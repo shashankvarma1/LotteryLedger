@@ -1,3 +1,19 @@
+# Dependencies
 node_modules/
+
+# Next.js build output
 .next/
+out/
+
+# Environment variables (keep your secrets safe)
 .env.local
+.env.*.local
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

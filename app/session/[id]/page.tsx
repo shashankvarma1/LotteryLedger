@@ -17,74 +17,445 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
   const storeName = localStorage.getItem('selected_store_name') || ''
-
-  let grandSold = 0
-  let grandAmt  = 0
+  let grandSold = 0, grandAmt = 0
 
   const rows = tickets.map((ticket, i) => {
     const book  = bookMap[i + 1]
     const price = ticket.value
+
     if (!book || book.is_returned) {
-      return `<tr style="opacity:.4"><td>${i+1}</td><td>#${ticket.ticket_number}</td><td style="text-align:right">$${price}</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>`
+      return `<tr style="opacity:.4">
+        <td>${i+1}</td>
+        <td>#${ticket.ticket_number}</td>
+        <td class="r">$${price}</td>
+        <td class="r">—</td>
+        <td class="r">—</td>
+        <td class="r">—</td>
+        <td class="r">—</td>
+      </tr>`
     }
     if (book.start_num === null || book.end_num === null) {
-      return `<tr><td>${i+1}</td><td>#${ticket.ticket_number}</td><td style="text-align:right">$${price}</td><td colspan="4" style="text-align:center;color:#aaa">not entered</td></tr>`
+      return `<tr>
+        <td>${i+1}</td>
+        <td>#${ticket.ticket_number}</td>
+        <td class="r">$${price}</td>
+        <td colspan="4" style="text-align:center;color:#94a3b8;font-style:italic">not entered</td>
+      </tr>`
     }
+
     const s = calcSold(book.start_num, book.end_num)
     const t = calcTotal(s, price)
     grandSold += s
     grandAmt   = parseFloat((grandAmt + t).toFixed(2))
+
     return `<tr>
-      <td>${i+1}</td><td>#${ticket.ticket_number}</td>
-      <td style="text-align:right">$${price}</td>
-      <td style="text-align:right">${book.start_num}</td>
-      <td style="text-align:right">${book.end_num}</td>
-      <td style="text-align:right">${s}</td>
-      <td style="text-align:right;font-weight:bold;color:#1a6b3a">$${t.toFixed(2)}</td>
+      <td>${i+1}</td>
+      <td>#${ticket.ticket_number}</td>
+      <td class="r" style="color:#d97706;font-weight:600">$${price % 1 === 0 ? price : price.toFixed(2)}</td>
+      <td class="r">${book.start_num}</td>
+      <td class="r">${book.end_num}</td>
+      <td class="r">${s}</td>
+      <td class="r" style="font-weight:700;color:#059669">$${t.toFixed(2)}</td>
     </tr>`
   }).join('')
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Ledger — ${dateStr}</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Courier New',monospace;font-size:11px;color:#000;padding:24px 28px}
-h1{font-size:14px;font-weight:bold;letter-spacing:.08em;text-transform:uppercase;border-bottom:2px solid #000;padding-bottom:5px;margin-bottom:4px}
-.meta{font-size:10px;color:#666;margin-bottom:16px}
-table{width:100%;border-collapse:collapse}
-th{font-size:8px;letter-spacing:.07em;text-transform:uppercase;color:#888;border-bottom:2px solid #000;padding:3px 5px;text-align:right}
-th.l{text-align:left}
-td{padding:4px 5px;border-bottom:1px solid #ddd;text-align:right}
-td.l{text-align:left}
-tfoot td{border-top:2px solid #000;border-bottom:none;font-weight:bold;padding-top:6px}
-.summary{display:flex;gap:24px;margin-top:14px;padding-top:12px;border-top:2px solid #000}
-.s-lbl{font-size:8px;text-transform:uppercase;color:#888;margin-bottom:2px}
-.s-val{font-size:18px;font-weight:bold}.green{color:#1a6b3a}
-footer{margin-top:20px;font-size:8px;color:#bbb;border-top:1px solid #eee;padding-top:6px}
-</style></head><body>
-<h1>Lottery Ledger${storeName ? ' — ' + storeName : ''}</h1>
-<div class="meta">${dateStr.toUpperCase()}${session.notes ? ' · ' + session.notes : ''}</div>
-<table>
-  <thead><tr>
-    <th class="l">#</th><th class="l">Ticket</th><th>Price</th>
-    <th>Start</th><th>End</th><th>Sold</th><th>Total</th>
-  </tr></thead>
-  <tbody>${rows}</tbody>
-  <tfoot><tr>
-    <td colspan="5" class="l" style="font-size:8px;color:#888">TOTAL</td>
-    <td>${grandSold}</td><td class="green">$${grandAmt.toFixed(2)}</td>
-  </tr></tfoot>
-</table>
-<div class="summary">
-  <div><div class="s-lbl">Total Sold</div><div class="s-val">${grandSold}</div></div>
-  <div><div class="s-lbl">Revenue</div><div class="s-val green">$${grandAmt.toFixed(2)}</div></div>
-</div>
-<footer>Printed ${new Date().toLocaleString()}</footer>
-</body></html>`
+  const sr50NetSales = n(session.sr50_net_sales)
+  const sr50Cashes   = n(session.sr50_cashes)
+  const ir34Cashes   = n(session.ir34_totals)
+  const finalTotal   = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+  const fileName     = `lottery-ledger-${storeName ? storeName.replace(/\s+/g, '-').toLowerCase() + '-' : ''}${session.session_date}.html`
 
+  const enteredCount = tickets.filter((_, i) => {
+    const b = bookMap[i + 1]
+    return b && !b.is_returned && b.start_num !== null && b.end_num !== null
+  }).length
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Lottery Ledger — ${session.session_date}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      font-size: 12px;
+      color: #0f172a;
+      background: #fff;
+      padding: 32px 36px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding-bottom: 20px;
+      border-bottom: 3px solid #0f172a;
+      margin-bottom: 24px;
+    }
+
+    .logo {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+      color: #0f172a;
+    }
+
+    .logo span { color: #d97706; }
+
+    .header-meta { text-align: right; }
+
+    .header-date {
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .header-store {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      margin-top: 3px;
+    }
+
+    .header-note {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 2px;
+      font-style: italic;
+    }
+
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .stat-box {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+
+    .stat-lbl {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: #94a3b8;
+      margin-bottom: 6px;
+    }
+
+    .stat-val {
+      font-family: 'DM Mono', monospace;
+      font-size: 24px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    .stat-val.green { color: #059669; }
+    .stat-val.gold  { color: #d97706; }
+
+    .section-title {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: .12em;
+      color: #94a3b8;
+      margin-bottom: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 24px;
+    }
+
+    thead tr { background: #f1f5f9; }
+
+    th {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #64748b;
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 2px solid #e2e8f0;
+      font-weight: 500;
+    }
+
+    th.r { text-align: right; }
+
+    td {
+      padding: 10px 10px;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 12px;
+      color: #0f172a;
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    td.r {
+      text-align: right;
+      font-family: 'DM Mono', monospace;
+    }
+
+    tbody tr:last-child td { border-bottom: none; }
+
+    tfoot tr td {
+      border-top: 2px solid #0f172a;
+      border-bottom: none;
+      font-weight: 700;
+      padding-top: 10px;
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      background: #f8fafc;
+    }
+
+    .formula-section {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .formula-box {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .formula-box-title {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: #94a3b8;
+      margin-bottom: 10px;
+    }
+
+    .formula-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 5px 0;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 12px;
+    }
+
+    .formula-row:last-child { border-bottom: none; }
+    .formula-label { color: #64748b; }
+
+    .formula-value {
+      font-family: 'DM Mono', monospace;
+      font-weight: 600;
+      color: #0f172a;
+    }
+
+    .formula-value.plus  { color: #0284c7; }
+    .formula-value.minus { color: #e11d48; }
+
+    .final-box {
+      background: #f0fdf4;
+      border: 2px solid #059669;
+      border-radius: 12px;
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .final-box.negative {
+      background: #fff1f2;
+      border-color: #e11d48;
+    }
+
+    .final-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: #059669;
+      margin-bottom: 6px;
+    }
+
+    .final-box.negative .final-label { color: #e11d48; }
+
+    .final-value {
+      font-family: 'DM Mono', monospace;
+      font-size: 40px;
+      font-weight: 700;
+      color: #059669;
+      line-height: 1;
+    }
+
+    .final-value.negative { color: #e11d48; }
+
+    .final-formula-text {
+      font-size: 10px;
+      color: #94a3b8;
+      margin-top: 6px;
+    }
+
+    .final-icon {
+      font-size: 52px;
+      opacity: .12;
+    }
+
+    .page-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-top: 16px;
+      border-top: 1px solid #e2e8f0;
+      font-size: 10px;
+      color: #94a3b8;
+      font-family: 'DM Mono', monospace;
+    }
+
+    @media print {
+      body { padding: 20px 24px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="page-header">
+    <div>
+      <div class="logo">🎰 Lottery <span>Ledger</span></div>
+      <div style="font-size:11px;color:#94a3b8;margin-top:4px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:.06em">
+        Daily Report
+      </div>
+    </div>
+    <div class="header-meta">
+      <div class="header-date">${dateStr}</div>
+      <div class="header-store">${storeName || 'Store'}</div>
+      ${session.notes ? `<div class="header-note">${session.notes}</div>` : ''}
+    </div>
+  </div>
+
+  <!-- Stats strip -->
+  <div class="stats-strip">
+    <div class="stat-box">
+      <div class="stat-lbl">Tickets Entered</div>
+      <div class="stat-val">${enteredCount}/${tickets.length}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-lbl">Total Sold</div>
+      <div class="stat-val gold">${grandSold}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-lbl">Ticket Revenue</div>
+      <div class="stat-val green">$${grandAmt.toFixed(2)}</div>
+    </div>
+  </div>
+
+  <!-- Ledger table -->
+  <div class="section-title">Ticket Ledger</div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Ticket</th>
+        <th class="r">Price</th>
+        <th class="r">Start</th>
+        <th class="r">End</th>
+        <th class="r">Sold</th>
+        <th class="r">Total</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+    <tfoot>
+      <tr>
+        <td colspan="5" style="text-align:left;font-size:10px;color:#64748b;letter-spacing:.06em;text-transform:uppercase">
+          Ticket Total
+        </td>
+        <td class="r">${grandSold}</td>
+        <td class="r" style="color:#059669">$${grandAmt.toFixed(2)}</td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <!-- SR50 / IR34 formula -->
+  <div class="section-title">SR50 &amp; IR34 Summary</div>
+  <div class="formula-section">
+    <div class="formula-box">
+      <div class="formula-box-title">SR50 — Invoice</div>
+      <div class="formula-row">
+        <span class="formula-label">Net Sales</span>
+        <span class="formula-value plus">$${sr50NetSales.toFixed(2)}</span>
+      </div>
+      <div class="formula-row">
+        <span class="formula-label">SR50 Cashes</span>
+        <span class="formula-value minus">−$${sr50Cashes.toFixed(2)}</span>
+      </div>
+    </div>
+    <div class="formula-box">
+      <div class="formula-box-title">IR34 — Cashing</div>
+      <div class="formula-row">
+        <span class="formula-label">IR34 Cashes</span>
+        <span class="formula-value minus">−$${ir34Cashes.toFixed(2)}</span>
+      </div>
+      <div class="formula-row">
+        <span class="formula-label">Ticket Revenue</span>
+        <span class="formula-value">$${grandAmt.toFixed(2)}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Final total -->
+  <div class="final-box ${finalTotal < 0 ? 'negative' : ''}">
+    <div>
+      <div class="final-label">Final Total</div>
+      <div class="final-value ${finalTotal < 0 ? 'negative' : ''}">
+        ${finalTotal >= 0 ? '$' : '−$'}${Math.abs(finalTotal).toFixed(2)}
+      </div>
+      <div class="final-formula-text">
+        Tickets ($${grandAmt.toFixed(2)}) + Net Sales ($${sr50NetSales.toFixed(2)})
+        − SR50 Cashes ($${sr50Cashes.toFixed(2)}) − IR34 Cashes ($${ir34Cashes.toFixed(2)})
+      </div>
+    </div>
+    <div class="final-icon">${finalTotal >= 0 ? '✓' : '!'}</div>
+  </div>
+
+  <!-- Footer -->
+  <div class="page-footer">
+    <span>Generated ${new Date().toLocaleString()}</span>
+    <span>${storeName} · Lottery Ledger</span>
+  </div>
+
+</body>
+</html>`
+
+  // Download as file
+  const blob = new Blob([html], { type: 'text/html' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href = url; a.download = fileName; a.click()
+  URL.revokeObjectURL(url)
+
+  // Open print dialog
   const w = window.open('', '_blank')
   if (!w) return
-  w.document.write(html); w.document.close(); w.focus()
-  setTimeout(() => w.print(), 320)
+  w.document.write(html)
+  w.document.close()
+  w.focus()
+  setTimeout(() => w.print(), 500)
 }
 
 // ─── Report Panel ─────────────────────────────────────────────────────────────
@@ -93,20 +464,24 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
   const [tab,    setTab]    = useState<'sr50' | 'ir34'>('sr50')
   const [draft,  setDraft]  = useState<Partial<Session>>({})
   const [saving, setSaving] = useState(false)
+  const [saved,  setSaved]  = useState(false)
   const merged = { ...session, ...draft }
 
   async function save() {
     if (Object.keys(draft).length === 0) return
     setSaving(true)
     const { data } = await supabase.from('sessions').update(draft).eq('id', session.id).select().single()
-    if (data) { onSave(data); setDraft({}) }
+    if (data) {
+      onSave(data); setDraft({})
+      setSaved(true); setTimeout(() => setSaved(false), 2000)
+    }
     setSaving(false)
   }
 
   function fi(key: keyof Session, label: string) {
     return (
-      <div style={{ marginBottom: 12 }}>
-        <label style={{ display: 'block', fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 5 }}>{label}</label>
+      <div style={{ marginBottom: 14 }}>
+        <label className="field-label">{label}</label>
         <input
           type="number" inputMode="decimal" step="0.01"
           value={draft[key] !== undefined ? String(draft[key]) : String(merged[key] ?? '')}
@@ -114,73 +489,76 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
           onBlur={save}
           onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
           placeholder="0.00"
-          style={{ width: '100%', padding: '6px 0', fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 'bold', border: 'none', borderBottom: '2px solid var(--line-dk)', background: 'transparent', outline: 'none', color: 'var(--ink)' }}
+          className="field-input"
+          style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700 }}
         />
       </div>
     )
   }
 
-  const computedNet = parseFloat((
-    n(merged.sr50_net_sales) - n(merged.sr50_commission) - n(merged.sr50_cashes)
-    - n(merged.sr50_cash_bonus) - n(merged.sr50_claims_bonus)
-    + n(merged.sr50_adjustments) - n(merged.sr50_service_fee)
-  ).toFixed(2))
-
   return (
     <div className="report-panel">
       <div className="report-tab-row">
-        <button className={`report-tab ${tab === 'sr50' ? 'active' : ''}`} onClick={() => setTab('sr50')}>SR50 — Invoice</button>
-        <button className={`report-tab ${tab === 'ir34' ? 'active' : ''}`} onClick={() => setTab('ir34')}>IR34 — Cashing</button>
+        <button className={`report-tab ${tab === 'sr50' ? 'active' : ''}`} onClick={() => setTab('sr50')}>SR50</button>
+        <button className={`report-tab ${tab === 'ir34' ? 'active' : ''}`} onClick={() => setTab('ir34')}>IR34</button>
       </div>
       <div className="report-body">
+        {saved && (
+          <div style={{ marginBottom: 14, padding: '8px 14px', background: 'var(--emerald-lt)', border: '1px solid var(--emerald)', borderRadius: 8, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--emerald)', fontWeight: 600 }}>
+            ✓ Values saved
+          </div>
+        )}
+        {saving && (
+          <div style={{ marginBottom: 14, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-faint)' }}>
+            Saving...
+          </div>
+        )}
+
         {tab === 'sr50' && (<>
           <div className="report-grid">
-            <div className="rbox"><div className="rbox-lbl">Net Sales</div><div className="rbox-val blue">${n(merged.sr50_net_sales).toFixed(2)}</div></div>
-            <div className="rbox"><div className="rbox-lbl">Cashes</div><div className="rbox-val red">${n(merged.sr50_cashes).toFixed(2)}</div></div>
-            <div className="rbox"><div className="rbox-lbl">Commission</div><div className="rbox-val red">${n(merged.sr50_commission).toFixed(2)}</div></div>
-            <div className="rbox" style={{ gridColumn: '1/-1', background: 'var(--green-lt)', borderColor: 'var(--green)' }}>
-              <div className="rbox-lbl">NET DUE (computed)</div>
-              <div className="rbox-val green big">${computedNet.toFixed(2)}</div>
+            <div className="rbox">
+              <div className="rbox-lbl">Net Sales</div>
+              <div className="rbox-val" style={{ color: 'var(--sky)' }}>${n(merged.sr50_net_sales).toFixed(2)}</div>
+            </div>
+            <div className="rbox">
+              <div className="rbox-lbl">SR50 Cashes</div>
+              <div className="rbox-val red">${n(merged.sr50_cashes).toFixed(2)}</div>
             </div>
           </div>
           <div className="divider" />
-          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 10 }}>Enter from SR50 receipt</div>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 14 }}>
+            Enter from SR50 receipt
+          </div>
           {fi('sr50_net_sales', 'Net Sales')}
-          {fi('sr50_commission', 'Commission')}
-          {fi('sr50_cashes', 'Cashes')}
-          {fi('sr50_cash_bonus', 'Cash Bonus')}
-          {fi('sr50_claims_bonus', 'Claims Bonus')}
-          {fi('sr50_adjustments', 'Adjustments')}
-          {fi('sr50_service_fee', 'Service Fee')}
-          {fi('sr50_net_due', 'Net Due (from receipt)')}
-          {saving && <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Saving...</div>}
+          {fi('sr50_cashes', 'SR50 Cashes')}
         </>)}
+
         {tab === 'ir34' && (<>
-          <div className="report-grid">
-            <div className="rbox"><div className="rbox-lbl">Ticket Count</div><div className="rbox-val">{n(merged.ir34_tickets)}</div></div>
-            <div className="rbox"><div className="rbox-lbl">Today&#39;s Cashing</div><div className="rbox-val blue">${n(merged.ir34_totals).toFixed(2)}</div></div>
+          <div className="report-grid" style={{ gridTemplateColumns: '1fr' }}>
+            <div className="rbox">
+              <div className="rbox-lbl">IR34 Cashes</div>
+              <div className="rbox-val red">${n(merged.ir34_totals).toFixed(2)}</div>
+            </div>
           </div>
           <div className="divider" />
-          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 10 }}>Enter from Instant Report 34</div>
-          {fi('ir34_tickets', '# Tickets')}
-          {fi('ir34_totals', 'Totals amount ($)')}
-          {saving && <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Saving...</div>}
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 14 }}>
+            Enter from IR34
+          </div>
+          {fi('ir34_totals', 'IR34 Cashes')}
         </>)}
       </div>
     </div>
   )
 }
 
-// ─── Inline number input ──────────────────────────────────────────────────────
+// ─── NumInput ─────────────────────────────────────────────────────────────────
 
-function NumInput({
-  value,
-  placeholder,
-  onSave,
-}: {
+function NumInput({ value, placeholder, onSave, onEnter, isInvalid }: {
   value: number | null
   placeholder?: string
   onSave: (v: number | null) => void
+  onEnter?: () => void
+  isInvalid?: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft,   setDraft]   = useState('')
@@ -207,15 +585,16 @@ function NumInput({
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={e => {
-          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
+          if (e.key === 'Enter') { e.preventDefault(); commit(); setTimeout(() => onEnter?.(), 60) }
           if (e.key === 'Escape') setEditing(false)
         }}
         style={{
-          width: '100%', height: 44, padding: '0 6px',
+          width: '100%', height: 46, padding: '0 10px',
           fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700,
           textAlign: 'right', border: 'none',
-          background: '#fffce8', outline: 'none', color: 'var(--ink)',
-          borderBottom: '2px solid var(--red)',
+          background: 'rgba(240,165,0,0.08)',
+          outline: '2px solid var(--gold)',
+          color: 'var(--ink)',
         }}
       />
     )
@@ -225,14 +604,76 @@ function NumInput({
     <div
       onClick={startEdit}
       style={{
-        height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        padding: '0 8px', cursor: 'text',
+        height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        padding: '0 10px', cursor: 'text',
         fontFamily: 'var(--mono)', fontSize: 15,
-        color: value !== null ? 'var(--ink)' : 'var(--line-dk)',
-        fontWeight: value !== null ? 700 : 400,
+        color: isInvalid ? 'var(--rose)' : (value !== null ? 'var(--ink)' : 'var(--ink-ghost)'),
+        fontWeight: value !== null ? 600 : 400,
+        background: isInvalid ? 'var(--rose-lt)' : undefined,
       }}
     >
-      {value !== null ? value : (placeholder || '—')}
+      {value !== null
+        ? <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {value}
+            <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>
+          </span>
+        : (placeholder || '—')
+      }
+    </div>
+  )
+}
+
+// ─── Notes Input ──────────────────────────────────────────────────────────────
+
+function NotesInput({ session, onSave }: { session: Session; onSave: (s: Session) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft,   setDraft]   = useState(session.notes || '')
+  const [saving,  setSaving]  = useState(false)
+  const ref = useRef<HTMLInputElement>(null)
+
+  async function commit() {
+    setEditing(false)
+    if (draft === (session.notes || '')) return
+    setSaving(true)
+    const { data } = await supabase.from('sessions').update({ notes: draft || null }).eq('id', session.id).select().single()
+    if (data) onSave(data)
+    setSaving(false)
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={ref} autoFocus type="text"
+        value={draft}
+        placeholder="Add a note for this session..."
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') { setEditing(false); setDraft(session.notes || '') }
+        }}
+        style={{
+          flex: 1, border: 'none', outline: 'none',
+          background: 'rgba(240,165,0,0.06)',
+          borderBottom: '1px solid var(--gold)',
+          fontFamily: 'var(--sans)', fontSize: 12,
+          color: 'var(--ink)', padding: '4px 8px', borderRadius: 4,
+        }}
+      />
+    )
+  }
+
+  return (
+    <div
+      onClick={() => { setEditing(true); setTimeout(() => ref.current?.focus(), 20) }}
+      style={{
+        flex: 1, cursor: 'text', fontFamily: 'var(--sans)', fontSize: 12,
+        padding: '4px 4px', color: session.notes ? 'var(--ink-mid)' : 'var(--ink-ghost)',
+        display: 'flex', alignItems: 'center', gap: 6,
+      }}
+    >
+      {saving ? 'Saving...' : (session.notes || 'Add note...')}
+      {!saving && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>}
     </div>
   )
 }
@@ -246,11 +687,38 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [loading,    setLoading]    = useState(true)
   const [toast,      setToast]      = useState('')
   const [showReport, setShowReport] = useState(false)
-  const redirected = useRef(false)
+  const [isOnline,   setIsOnline]   = useState(true)
+  const redirected    = useRef(false)
+  const startCellRefs = useRef<(HTMLDivElement | null)[]>([])
+  const endCellRefs   = useRef<(HTMLDivElement | null)[]>([])
 
-  function showToast(msg: string) {
-    setToast(msg); setTimeout(() => setToast(''), 2000)
-  }
+  // ── Online / offline ──
+  useEffect(() => {
+    setIsOnline(navigator.onLine)
+    const on  = () => setIsOnline(true)
+    const off = () => setIsOnline(false)
+    window.addEventListener('online',  on)
+    window.addEventListener('offline', off)
+    return () => {
+      window.removeEventListener('online',  on)
+      window.removeEventListener('offline', off)
+    }
+  }, [])
+
+  // ── Warn before leaving ──
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault() }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
+
+  // ── Apply saved display prefs ──
+  useEffect(() => {
+    if (localStorage.getItem('light_mode')  === 'true') document.body.classList.add('light')
+    if (localStorage.getItem('large_fonts') === 'true') document.body.classList.add('text-lg')
+  }, [])
+
+  function showToast(msg: string) { setToast(msg); setTimeout(() => setToast(''), 2500) }
 
   const load = useCallback(async () => {
     const { data: { session: auth } } = await supabase.auth.getSession()
@@ -282,31 +750,30 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   async function saveBookField(ticketIndex: number, field: 'start_num' | 'end_num', value: number | null) {
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
-
     const existingBook = bookMap[ticketIndex + 1]
     const ticket       = tickets[ticketIndex]
 
     if (existingBook) {
-      const updates = { [field]: value }
-      const { data } = await supabase.from('books').update(updates).eq('id', existingBook.id).select().single()
+      const { data } = await supabase.from('books').update({ [field]: value }).eq('id', existingBook.id).select().single()
       if (data) {
         setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
-        // Show toast if both values are now set
         const updated = { ...existingBook, [field]: value }
         if (updated.start_num !== null && updated.end_num !== null && ticket) {
           const s = calcSold(updated.start_num, updated.end_num)
-          const t = calcTotal(s, ticket.value)
-          showToast(`#${ticket.ticket_number} → ${s} sold · $${t.toFixed(2)}`)
+          showToast(`#${ticket.ticket_number} → ${s} sold · $${calcTotal(s, ticket.value).toFixed(2)}`)
+          if (navigator.vibrate) navigator.vibrate(40)
         }
       }
     } else {
-      const insertData: Record<string, unknown> = {
-        session_id: session.id, row_number: ticketIndex + 1,
-        is_returned: false, user_id: auth.user.id,
-        start_num: null, end_num: null,
-        [field]: value,
-      }
-      const { data } = await supabase.from('books').insert(insertData).select().single()
+      const { data } = await supabase.from('books').insert({
+        session_id:  session.id,
+        row_number:  ticketIndex + 1,
+        is_returned: false,
+        user_id:     auth.user.id,
+        start_num:   null,
+        end_num:     null,
+        [field]:     value,
+      }).select().single()
       if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     }
   }
@@ -314,7 +781,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   async function toggleReturn(ticketIndex: number) {
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
-
     const existingBook = bookMap[ticketIndex + 1]
     const newReturned  = !existingBook?.is_returned
 
@@ -329,21 +795,66 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       }).select().single()
       if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     }
+    if (navigator.vibrate) navigator.vibrate(40)
     showToast(newReturned ? 'Marked as returned' : 'Unmarked')
   }
 
-  // Totals — include rows where sold = 0 (start = end)
-  const grandSold = tickets.reduce((sum, ticket, idx) => {
-    const book = bookMap[idx + 1]
-    if (!book || book.is_returned || book.start_num === null || book.end_num === null) return sum
-    return sum + calcSold(book.start_num, book.end_num)
+  // ── Copy from yesterday ──
+  async function copyFromYesterday() {
+    const { data: { session: auth } } = await supabase.auth.getSession()
+    if (!auth || !session) return
+
+    const yesterday = new Date(session.session_date + 'T00:00:00')
+    yesterday.setDate(yesterday.getDate() - 1)
+    const yDate = yesterday.toISOString().split('T')[0]
+    const sid   = localStorage.getItem('selected_store_id')
+
+    const { data: prevSession } = await supabase.from('sessions').select('id')
+      .eq('user_id', auth.user.id).eq('store_id', sid || '').eq('session_date', yDate).single()
+
+    if (!prevSession) { showToast('No session found for yesterday'); return }
+
+    const { data: prevBooks } = await supabase.from('books').select('*')
+      .eq('session_id', prevSession.id).eq('user_id', auth.user.id).order('row_number')
+
+    if (!prevBooks || prevBooks.length === 0) { showToast("No data in yesterday's session"); return }
+
+    let copied = 0
+    for (const prevBook of prevBooks) {
+      const rowNum = prevBook.row_number
+      if (prevBook.end_num === null) continue
+      const existing = bookMap[rowNum]
+
+      if (existing) {
+        if (existing.start_num !== null) continue
+        const { data } = await supabase.from('books').update({ start_num: prevBook.end_num }).eq('id', existing.id).select().single()
+        if (data) setBookMap(prev => ({ ...prev, [rowNum]: data }))
+      } else {
+        const { data } = await supabase.from('books').insert({
+          session_id: session.id, row_number: rowNum,
+          is_returned: false, user_id: auth.user.id,
+          start_num: prevBook.end_num, end_num: null,
+        }).select().single()
+        if (data) setBookMap(prev => ({ ...prev, [rowNum]: data }))
+      }
+      copied++
+    }
+
+    if (navigator.vibrate) navigator.vibrate([40, 30, 40])
+    showToast(copied > 0 ? `✓ Copied ${copied} start numbers from yesterday` : 'Nothing to copy')
+  }
+
+  // ── Totals ──
+  const grandSold = tickets.reduce((sum, _, idx) => {
+    const b = bookMap[idx + 1]
+    if (!b || b.is_returned || b.start_num === null || b.end_num === null) return sum
+    return sum + calcSold(b.start_num, b.end_num)
   }, 0)
 
   const grandAmt = tickets.reduce((sum, ticket, idx) => {
-    const book = bookMap[idx + 1]
-    if (!book || book.is_returned || book.start_num === null || book.end_num === null) return sum
-    const s = calcSold(book.start_num, book.end_num)
-    return parseFloat((sum + calcTotal(s, ticket.value)).toFixed(2))
+    const b = bookMap[idx + 1]
+    if (!b || b.is_returned || b.start_num === null || b.end_num === null) return sum
+    return parseFloat((sum + calcTotal(calcSold(b.start_num, b.end_num), ticket.value)).toFixed(2))
   }, 0)
 
   const enteredCount = tickets.filter((_, idx) => {
@@ -351,7 +862,13 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     return b && !b.is_returned && b.start_num !== null && b.end_num !== null
   }).length
 
-  const netDue    = n(session?.sr50_net_due)
+  // ── Final total ──
+  const sr50NetSales = n(session?.sr50_net_sales)
+  const sr50Cashes   = n(session?.sr50_cashes)
+  const ir34Cashes   = n(session?.ir34_totals)
+  const finalTotal   = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+  const hasFinalData = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0
+
   const storeName = typeof window !== 'undefined' ? localStorage.getItem('selected_store_name') || '' : ''
 
   if (loading) return <div className="empty" style={{ marginTop: 80 }}>LOADING...</div>
@@ -361,45 +878,84 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const isToday     = session.session_date === new Date().toISOString().split('T')[0]
 
   return (
-    <div style={{ maxWidth: 600, margin: '0 auto', paddingBottom: 40 }}>
+    <div style={{ maxWidth: 620, margin: '0 auto', paddingBottom: 40 }}>
 
-      <header className="hdr">
+      {/* Offline banner */}
+      {!isOnline && (
+        <div className="offline-banner">
+          ⚠ No internet connection — changes may not save
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="hdr" style={{ marginTop: !isOnline ? 38 : 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <a href="/?noredirect=1" style={{ fontSize: 20, color: 'var(--ink)', textDecoration: 'none', padding: '4px 8px 4px 0', lineHeight: 1 }}>←</a>
+          <a href="/?noredirect=1" style={{ fontSize: 20, color: 'var(--ink-faint)', textDecoration: 'none', padding: '4px 8px 4px 0', lineHeight: 1 }}>←</a>
           <div>
-            <div className="hdr-title">{isToday ? 'TODAY' : sessionDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase()}</div>
+            <div className="hdr-title">
+              {isToday ? '⭐ TODAY' : sessionDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase()}
+            </div>
             <div className="hdr-sub">{storeName} · {enteredCount}/{tickets.length} ENTERED</div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {enteredCount > 0 && (
-            <button className="btn btn-sm" onClick={() => printSession(session, bookMap, tickets)}>⎙ PDF</button>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--emerald)', display: 'flex', alignItems: 'center', gap: 3 }}>
+              ✓ saved
+            </span>
           )}
-          <a href="/history" className="btn btn-sm">HISTORY</a>
+          {enteredCount > 0 && (
+            <button className="btn btn-ghost btn-sm" onClick={() => printSession(session, bookMap, tickets)}>
+              ⎙ PDF
+            </button>
+          )}
+          <a href="/history" className="btn btn-ghost btn-sm">History</a>
         </div>
       </header>
 
+      {/* Summary bar */}
       <div className="sbar">
         <div className="sbar-cell">
           <div className="sbar-lbl">Entered</div>
-          <div className="sbar-val">{enteredCount}/{tickets.length}</div>
+          <div className="sbar-val">
+            {enteredCount}<span style={{ fontSize: 14, color: 'var(--ink-faint)', fontWeight: 400 }}>/{tickets.length}</span>
+          </div>
         </div>
         <div className="sbar-cell">
-          <div className="sbar-lbl">Sold</div>
+          <div className="sbar-lbl">Total Sold</div>
           <div className="sbar-val">{grandSold}</div>
         </div>
         <div className="sbar-cell">
-          <div className="sbar-lbl">Revenue</div>
+          <div className="sbar-lbl">Ticket Revenue</div>
           <div className="sbar-val green">${grandAmt.toFixed(2)}</div>
         </div>
       </div>
 
+      {/* Notes + Copy from yesterday */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line)' }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Note</span>
+        <NotesInput session={session} onSave={s => setSession(s)} />
+        {isToday && (
+          <button
+            onClick={copyFromYesterday}
+            className="btn btn-ghost btn-sm"
+            title="Copy start numbers from yesterday's end numbers"
+            style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
+          >
+            ⬆ Yesterday
+          </button>
+        )}
+      </div>
+
+      {/* No tickets warning */}
       {tickets.length === 0 && (
-        <div style={{ margin: '16px', padding: '12px 14px', background: 'var(--red-lt)', border: '1px solid var(--red)', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--red)' }}>
-          ⚠ No tickets configured. Go to <a href="/settings" style={{ color: 'var(--red)', fontWeight: 700 }}>Settings</a> first.
+        <div style={{ margin: 18, padding: '14px 18px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 13, color: 'var(--rose)' }}>
+          ⚠ No tickets configured. Go to{' '}
+          <a href="/settings" style={{ color: 'var(--rose)', fontWeight: 700 }}>Settings</a> first.
         </div>
       )}
 
+      {/* Ledger table */}
       {tickets.length > 0 && (
         <div className="tbl-wrap">
           <table className="tbl" style={{ tableLayout: 'auto' }}>
@@ -411,79 +967,84 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 <th>End</th>
                 <th>Sold</th>
                 <th>Total</th>
-                <th />
+                <th style={{ width: 40 }} />
               </tr>
             </thead>
             <tbody>
               {tickets.map((ticket, idx) => {
-                const book       = bookMap[idx + 1]
-                const isReturned = book?.is_returned ?? false
-                const startNum   = book?.start_num ?? null
-                const endNum     = book?.end_num   ?? null
-                const hasData    = startNum !== null && endNum !== null
-                const s          = hasData && !isReturned ? calcSold(startNum!, endNum!) : null
-                const t          = s !== null ? calcTotal(s, ticket.value) : null
-                const isFinished = ticket.value === 0
+                const book        = bookMap[idx + 1]
+                const isReturned  = book?.is_returned ?? false
+                const startNum    = book?.start_num ?? null
+                const endNum      = book?.end_num   ?? null
+                const hasData     = startNum !== null && endNum !== null
+                const s           = hasData && !isReturned ? calcSold(startNum!, endNum!) : null
+                const t           = s !== null ? calcTotal(s, ticket.value) : null
+                const isFinished  = ticket.value === 0
+                const isInvalidEnd = startNum !== null && endNum !== null && endNum < startNum
 
                 return (
                   <tr
                     key={ticket.ticket_number}
                     className={isReturned ? 'ret' : ''}
-                    style={{ background: !isReturned && !hasData ? 'var(--warm)' : undefined }}
+                    style={{ background: !isReturned && !hasData && !isFinished ? 'rgba(240,165,0,0.03)' : undefined }}
                   >
                     {/* Ticket number */}
                     <td>
-                      <div style={{ height: 44, display: 'flex', alignItems: 'center', paddingLeft: 10, gap: 6 }}>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: isFinished ? 'var(--ink-faint)' : 'var(--ink)' }}>
+                      <div style={{ height: 46, display: 'flex', alignItems: 'center', paddingLeft: 12, gap: 8 }}>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: isFinished || isReturned ? 'var(--ink-faint)' : 'var(--ink)' }}>
                           #{ticket.ticket_number}
                         </span>
-                        {isFinished && !isReturned && (
-                          <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--ink-faint)', background: 'var(--line)', padding: '2px 5px', letterSpacing: '.04em' }}>
-                            FINISHED
-                          </span>
-                        )}
-                        {!hasData && !isReturned && !isFinished && (
-                          <span style={{ fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.04em' }}>tap to enter</span>
-                        )}
+                        {isFinished && !isReturned && <span className="badge badge-muted">DONE</span>}
+                        {!hasData && !isReturned && !isFinished && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>tap</span>}
+                        {isInvalidEnd && <span className="badge badge-red">!</span>}
                       </div>
                     </td>
 
                     {/* Price */}
                     <td>
-                      <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6 }}>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: isFinished ? 'var(--ink-faint)' : 'var(--green)', fontWeight: 700 }}>
+                      <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: isFinished ? 'var(--ink-faint)' : 'var(--gold)' }}>
                           ${ticket.value % 1 === 0 ? ticket.value : ticket.value.toFixed(2)}
                         </span>
                       </div>
                     </td>
 
                     {/* Start */}
-                    <td style={{ minWidth: 64 }}>
+                    <td style={{ minWidth: 68 }} ref={el => { startCellRefs.current[idx] = el }}>
                       {isReturned
-                        ? <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 8px', color: 'var(--ink-faint)' }}>—</div>
-                        : <NumInput value={startNum} placeholder="start" onSave={v => saveBookField(idx, 'start_num', v)} />
+                        ? <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 10px', color: 'var(--ink-ghost)' }}>—</div>
+                        : <NumInput
+                            value={startNum} placeholder="start"
+                            onSave={v => saveBookField(idx, 'start_num', v)}
+                            onEnter={() => endCellRefs.current[idx]?.click()}
+                          />
                       }
                     </td>
 
                     {/* End */}
-                    <td style={{ minWidth: 64 }}>
+                    <td style={{ minWidth: 68 }} ref={el => { endCellRefs.current[idx] = el }}>
                       {isReturned
-                        ? <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 8px', color: 'var(--ink-faint)' }}>—</div>
-                        : <NumInput value={endNum} placeholder="end" onSave={v => saveBookField(idx, 'end_num', v)} />
+                        ? <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 10px', color: 'var(--ink-ghost)' }}>—</div>
+                        : <NumInput
+                            value={endNum} placeholder="end"
+                            onSave={v => saveBookField(idx, 'end_num', v)}
+                            onEnter={() => startCellRefs.current[idx + 1]?.click()}
+                            isInvalid={isInvalidEnd}
+                          />
                       }
                     </td>
 
                     {/* Sold */}
                     <td>
-                      <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6, fontFamily: 'var(--mono)', fontSize: 15, color: s === 0 ? 'var(--ink-faint)' : 'var(--ink)' }}>
-                        {isReturned ? '—' : (s !== null ? s : '')}
+                      <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10, fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: s === 0 ? 'var(--ink-faint)' : 'var(--ink)' }}>
+                        {isReturned ? '—' : (s !== null ? (isInvalidEnd ? <span style={{ color: 'var(--rose)' }}>!</span> : s) : '')}
                       </div>
                     </td>
 
-                    {/* Total — show $0.00 when sold = 0 and data is entered */}
+                    {/* Total */}
                     <td>
-                      <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6, fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700, color: t !== null && t > 0 ? 'var(--green)' : 'var(--ink-faint)' }}>
-                        {isReturned ? '—' : (t !== null ? '$' + t.toFixed(2) : '')}
+                      <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10, fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: t !== null && t > 0 ? 'var(--emerald)' : 'var(--ink-faint)' }}>
+                        {isReturned ? '—' : (t !== null && !isInvalidEnd ? '$' + t.toFixed(2) : '')}
                       </div>
                     </td>
 
@@ -492,8 +1053,8 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                       <button
                         className="xbtn"
                         onClick={() => toggleReturn(idx)}
-                        title={isReturned ? 'Unmark returned' : 'Mark as returned (—)'}
-                        style={{ fontSize: isReturned ? 12 : 16, color: isReturned ? 'var(--green)' : 'var(--ink-faint)' }}
+                        title={isReturned ? 'Unmark' : 'Mark returned'}
+                        style={{ color: isReturned ? 'var(--emerald)' : 'var(--ink-ghost)', fontSize: isReturned ? 13 : 18 }}
                       >
                         {isReturned ? '↩' : '—'}
                       </button>
@@ -504,13 +1065,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
             </tbody>
             <tfoot>
               <tr>
-                <td colSpan={4} style={{ textAlign: 'left', fontFamily: 'var(--sans)', fontSize: 9, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
-                  TOTAL
-                </td>
-                <td style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700 }}>{grandSold}</td>
-                <td style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: 'var(--green)' }}>
-                  ${grandAmt.toFixed(2)}
-                </td>
+                <td colSpan={4} style={{ textAlign: 'left', color: 'var(--ink-faint)', fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase' }}>TOTAL</td>
+                <td style={{ fontFamily: 'var(--mono)', fontWeight: 700 }}>{grandSold}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--emerald)' }}>${grandAmt.toFixed(2)}</td>
                 <td />
               </tr>
             </tfoot>
@@ -518,32 +1075,106 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      <div style={{ borderTop: '1px solid var(--line)', marginTop: 8 }}>
+      {/* SR50 / IR34 toggle */}
+      <div style={{ marginTop: 8, borderTop: '1px solid var(--line)' }}>
         <button
-          className={`btn ${showReport ? '' : 'btn-ghost'}`}
+          className={`btn ${showReport ? 'btn-gold' : 'btn-ghost'}`}
           onClick={() => setShowReport(v => !v)}
-          style={{ width: '100%', padding: '12px', fontSize: 12, borderLeft: 'none', borderRight: 'none', borderBottom: 'none' }}
+          style={{ width: '100%', padding: '13px', fontSize: 13, borderLeft: 'none', borderRight: 'none', borderBottom: 'none', borderRadius: 0 }}
         >
-          {showReport ? '▾' : '▸'} SR50 / IR34 REPORTS
+          {showReport ? '▾' : '▸'} SR50 / IR34
         </button>
       </div>
 
       {showReport && <ReportPanel session={session} onSave={s => setSession(s)} />}
 
-      {netDue > 0 && !showReport && (
+      {/* Final total banner */}
+      {hasFinalData && !showReport && (
+        <div onClick={() => setShowReport(true)} style={{ cursor: 'pointer' }}>
+          {/* Breakdown row */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
+            {[
+              { label: 'Tickets',     val: `$${grandAmt.toFixed(2)}`,    color: 'var(--ink)' },
+              { label: '+ Net Sales', val: `$${sr50NetSales.toFixed(2)}`, color: 'var(--sky)' },
+              { label: '− SR50',      val: `$${sr50Cashes.toFixed(2)}`,  color: 'var(--rose)' },
+              { label: '− IR34',      val: `$${ir34Cashes.toFixed(2)}`,  color: 'var(--rose)' },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{ textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Final total */}
+          <div style={{
+            padding: '14px 18px',
+            background: finalTotal >= 0 ? 'var(--emerald-lt)' : 'var(--rose-lt)',
+            borderTop: `1px solid ${finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)'}`,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', marginBottom: 4 }}>
+                Final Total
+              </div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 30, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', lineHeight: 1 }}>
+                ${finalTotal.toFixed(2)}
+              </div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', marginTop: 5 }}>
+                Tickets + Net Sales − SR50 − IR34 Cashes
+              </div>
+            </div>
+            <span style={{ color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', fontSize: 14 }}>edit →</span>
+          </div>
+        </div>
+      )}
+
+      {/* Prompt to enter SR50/IR34 */}
+      {!hasFinalData && !showReport && grandAmt > 0 && (
         <div
           onClick={() => setShowReport(true)}
-          style={{ padding: '12px 16px', background: 'var(--green-lt)', borderTop: '1px solid var(--green)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+          style={{ padding: '14px 18px', background: 'var(--card)', borderTop: '1px solid var(--line-dk)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
         >
           <div>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--green)' }}>SR50 — Net Due</div>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 22, fontWeight: 'bold', color: 'var(--green)' }}>${netDue.toFixed(2)}</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--gold)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 4 }}>
+              Enter SR50 &amp; IR34
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--ink-faint)' }}>Tap to calculate final total</div>
           </div>
-          <span style={{ color: 'var(--green)', fontSize: 14 }}>edit →</span>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--gold)' }}>
+            ${grandAmt.toFixed(2)} →
+          </div>
         </div>
       )}
 
       {toast && <div className="toast">{toast}</div>}
+      {/* Print button — fixed at bottom */}
+{enteredCount > 0 && (
+  <div style={{
+    position: 'fixed',
+    bottom: 0, left: 0, right: 0,
+    padding: '12px 18px',
+    background: 'var(--navy-glass)',
+    backdropFilter: 'blur(12px)',
+    borderTop: '1px solid var(--line-dk)',
+    display: 'flex',
+    gap: 10,
+    zIndex: 50,
+    maxWidth: 620,
+    margin: '0 auto',
+  }}>
+    <button
+      className="btn btn-gold"
+      onClick={() => printSession(session, bookMap, tickets)}
+      style={{ flex: 1, padding: '14px', fontSize: 14, fontWeight: 700, borderRadius: 12 }}
+    >
+      ⎙ Save &amp; Print PDF
+    </button>
+  </div>
+)}
+
+{/* Spacer so content doesn't hide behind fixed button */}
+{enteredCount > 0 && <div style={{ height: 72 }} />}
     </div>
   )
 }

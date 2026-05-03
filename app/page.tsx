@@ -20,22 +20,13 @@ export default function HomePage() {
         return
       }
       setUserEmail(session.user.email ?? '')
-
       const sid   = localStorage.getItem('selected_store_id')
       const sname = localStorage.getItem('selected_store_name')
+      if (!sid) { window.location.href = '/stores'; return }
+      setStoreId(sid); setStoreName(sname || 'Store')
 
-      if (!sid) {
-        window.location.href = '/stores'
-        return
-      }
-
-      setStoreId(sid)
-      setStoreName(sname || 'Store')
-
-      const { data } = await supabase
-        .from('sessions').select('*')
-        .eq('user_id', session.user.id)
-        .eq('store_id', sid)
+      const { data } = await supabase.from('sessions').select('*')
+        .eq('user_id', session.user.id).eq('store_id', sid)
         .order('session_date', { ascending: false })
 
       const list = data || []
@@ -62,10 +53,24 @@ export default function HomePage() {
   }
 
   async function create() {
-    if (!storeId) return
+    if (!storeId || creating) return
     setCreating(true)
+
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) { window.location.href = '/auth'; return }
+
+    // ── Guard: check if today's session already exists ──
+    const { data: existing } = await supabase.from('sessions')
+      .select('id')
+      .eq('store_id', storeId)
+      .eq('session_date', today)
+      .eq('user_id', session.user.id)
+      .single()
+
+    if (existing) {
+      window.location.href = `/session/${existing.id}`
+      return
+    }
 
     const { data } = await supabase.from('sessions').insert({
       session_date: today,
@@ -80,57 +85,73 @@ export default function HomePage() {
 
   if (loading) return <div className="empty" style={{ marginTop: 80 }}>LOADING...</div>
 
+  const dateLabel = new Date().toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric',
+  })
+
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
       <header className="hdr">
-        <div>
-          <div className="hdr-title">⊞ {storeName.toUpperCase()}</div>
-          <div className="hdr-sub">{userEmail}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 20 }}>🎰</span>
+          <div>
+            <div className="hdr-title">{storeName.toUpperCase()}</div>
+            <div className="hdr-sub">{userEmail}</div>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
-          <a href="/stores" className="btn btn-sm btn-ghost" title="Switch store">⇄ STORES</a>
-          <a href="/settings" className="btn btn-sm">SETTINGS</a>
-          <a href="/history" className="btn btn-sm">HISTORY</a>
-          <button onClick={signOut} className="btn btn-sm btn-ghost">OUT</button>
+          <a href="/stores"   className="btn btn-ghost btn-sm">⇄</a>
+          <a href="/settings" className="btn btn-ghost btn-sm">Settings</a>
+          <a href="/history"  className="btn btn-ghost btn-sm">History</a>
+          <button onClick={signOut} className="btn btn-ghost btn-sm">Out</button>
         </div>
       </header>
 
       <div style={{ padding: '32px 18px' }}>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', letterSpacing: '.1em', marginBottom: 8 }}>
-          {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }).toUpperCase()}
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--gold)', letterSpacing: '.1em', textTransform: 'uppercase', marginBottom: 8 }}>
+          {dateLabel}
         </div>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-faint)', marginBottom: 24 }}>
-          📍 {storeName}
-        </div>
-        <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-.02em', marginBottom: 12 }}>
-          Start today&#39;s ledger
+        <h1 style={{ fontFamily: 'var(--serif)', fontSize: 28, fontWeight: 700, color: 'var(--ink)', marginBottom: 8, lineHeight: 1.2 }}>
+          Today&#39;s Ledger
         </h1>
         <p style={{ fontSize: 13, color: 'var(--ink-faint)', marginBottom: 32, lineHeight: 1.6 }}>
-          Ticket values loaded from Settings for this store.<br />
-          Enter start &amp; end for each ticket row.
+          Store: <span style={{ color: 'var(--ink-mid)', fontWeight: 500 }}>{storeName}</span>
         </p>
-        <button
-          className="btn btn-red"
-          onClick={create}
-          disabled={creating}
-          style={{ width: '100%', padding: '16px', fontSize: 16 }}
-        >
-          {creating ? 'OPENING...' : "START TODAY'S LEDGER →"}
+
+        <button className="btn btn-gold" onClick={create} disabled={creating}
+          style={{ width: '100%', padding: '18px', fontSize: 16, borderRadius: 14 }}>
+          {creating ? 'Opening...' : "Start Today's Ledger →"}
         </button>
 
+        {/* Recent sessions */}
         {sessions.length > 0 && (
-          <div style={{ marginTop: 36, borderTop: '1px solid var(--line)', paddingTop: 14 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 8 }}>
-              Recent
+          <div style={{ marginTop: 40 }}>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 14 }}>
+              Recent Sessions
             </div>
-            {sessions.slice(0, 5).map(s => (
-              <a key={s.id} href={`/session/${s.id}`} className="hist-row" style={{ padding: '11px 0' }}>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
-                  {new Date(s.session_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                </span>
-                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--ink-faint)' }}>→</span>
-              </a>
-            ))}
+            <div style={{ background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, overflow: 'hidden' }}>
+              {sessions.slice(0, 5).map((s, i) => (
+                <a key={s.id} href={`/session/${s.id}`} className="hist-row"
+                  style={{ borderBottom: i < Math.min(sessions.length, 5) - 1 ? '1px solid var(--line)' : 'none' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 500, fontSize: 14 }}>
+                      {new Date(s.session_date + 'T00:00:00').toLocaleDateString('en-US', {
+                        weekday: 'short', month: 'short', day: 'numeric',
+                      })}
+                    </div>
+                    {s.notes && (
+                      <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginTop: 2 }}>{s.notes}</div>
+                    )}
+                  </div>
+                  {s.sr50_net_sales > 0 && (
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: 'var(--emerald)' }}>
+                      ${s.sr50_net_sales.toFixed(2)}
+                    </div>
+                  )}
+                  <span style={{ color: 'var(--ink-faint)', fontSize: 14 }}>→</span>
+                </a>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -5,6 +5,17 @@ export const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
 
+// Auto redirect to login if session expires
+if (typeof window !== 'undefined') {
+  supabase.auth.onAuthStateChange((event) => {
+    if (event === 'SIGNED_OUT') {
+      localStorage.removeItem('selected_store_id')
+      localStorage.removeItem('selected_store_name')
+      window.location.href = '/auth'
+    }
+  })
+}
+
 export type Session = {
   id: string
   session_date: string
@@ -21,6 +32,7 @@ export type Session = {
   ir34_totals: number
   notes: string | null
   user_id: string
+  store_id: string
   created_at: string
 }
 

@@ -56,7 +56,7 @@ export default function SettingsPage() {
   async function handleGenerate() {
     const last = parseInt(lastTicket)
     const val  = parseFloat(defaultVal)
-    if (!last || last < 1 || !val || isNaN(val) || !userId || !storeId) return
+    if (!last || last < 1 || isNaN(val) || val < 0 || !userId || !storeId) return
     setGenerating(true)
 
     const rows = Array.from({ length: last }, (_, i) => ({
@@ -86,7 +86,7 @@ export default function SettingsPage() {
   async function addTicket() {
     const num = parseInt(newNum)
     const val = parseFloat(newVal)
-    if (!num || !val || isNaN(num) || isNaN(val) || !userId || !storeId) return
+    if (!num || isNaN(num) || isNaN(val) || val < 0 || !userId || !storeId) return
     setAdding(true)
 
     await supabase.from('ticket_values').upsert({
@@ -111,7 +111,7 @@ export default function SettingsPage() {
 
   async function commitEdit(ticket_number: number) {
     const value = parseFloat(draft)
-    if (!draft || isNaN(value) || value <= 0 || !userId || !storeId) { setEditingNum(null); return }
+    if (draft === '' || isNaN(value) || value < 0 || !userId || !storeId) { setEditingNum(null); return }
     setSaving(true)
     await supabase.from('ticket_values').upsert({
       ticket_number, value, user_id: userId, store_id: storeId,
@@ -173,7 +173,7 @@ export default function SettingsPage() {
         {showSetup && (
           <div style={{ padding: '0 16px 20px' }}>
             <p style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 16, lineHeight: 1.6 }}>
-              Enter the last ticket number and a starting value. Creates tickets 1 through that number. Edit individual values after.
+              Enter the last ticket number and a starting value. Creates tickets 1 through that number. You can edit individual values after. Use $0 for finished/unsold books.
             </p>
             <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
@@ -196,7 +196,7 @@ export default function SettingsPage() {
             </div>
             <button
               className="btn btn-red" onClick={handleGenerate}
-              disabled={generating || !lastTicket || !defaultVal}
+              disabled={generating || !lastTicket || defaultVal === ''}
               style={{ width: '100%', padding: '12px', fontSize: 13 }}
             >
               {generating ? 'GENERATING...' : `GENERATE TICKETS 1–${lastTicket || '?'}`}
@@ -212,8 +212,11 @@ export default function SettingsPage() {
 
       {/* Add single ticket */}
       <div style={{ padding: '14px 16px 16px', borderBottom: '1px solid var(--line-dk)', background: 'var(--paper)' }}>
-        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 12 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 4 }}>
           Add / Update Single Ticket
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 10 }}>
+          Set value to $0 for finished books with no remaining stock.
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}>
@@ -226,7 +229,7 @@ export default function SettingsPage() {
             />
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 4, letterSpacing: '.06em', textTransform: 'uppercase' }}>Value ($)</div>
+            <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 4, letterSpacing: '.06em', textTransform: 'uppercase' }}>Value ($) — 0 = finished</div>
             <input
               id="newval"
               type="number" inputMode="decimal" step="0.01" placeholder="e.g. 10"
@@ -237,7 +240,7 @@ export default function SettingsPage() {
           </div>
           <button
             className="btn btn-red" onClick={addTicket}
-            disabled={adding || !newNum || !newVal}
+            disabled={adding || !newNum || newVal === ''}
             style={{ padding: '10px 14px', marginBottom: 2, fontSize: 13, flexShrink: 0 }}
           >
             {adding ? '...' : 'SAVE'}
@@ -278,9 +281,14 @@ export default function SettingsPage() {
           </thead>
           <tbody>
             {filtered.map(t => (
-              <tr key={t.ticket_number} style={{ borderBottom: '1px solid var(--line)' }}>
+              <tr key={t.ticket_number} style={{ borderBottom: '1px solid var(--line)', background: t.value === 0 ? 'var(--warm)' : undefined }}>
                 <td style={{ padding: '0 14px', height: 48 }}>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 16, color: 'var(--ink-mid)' }}>#{t.ticket_number}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 16, color: 'var(--ink-mid)' }}>#{t.ticket_number}</span>
+                    {t.value === 0 && (
+                      <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.06em', color: 'var(--ink-faint)', background: 'var(--line)', padding: '2px 6px' }}>FINISHED</span>
+                    )}
+                  </div>
                 </td>
                 <td style={{ padding: '0 10px', textAlign: 'right' }}>
                   {editingNum === t.ticket_number ? (
@@ -298,7 +306,7 @@ export default function SettingsPage() {
                     </div>
                   ) : (
                     <button onClick={() => startEdit(t)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--green)', padding: '8px 10px', borderBottom: '1px dashed var(--line-dk)', minWidth: 80, textAlign: 'right' }}>
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: t.value === 0 ? 'var(--ink-faint)' : 'var(--green)', padding: '8px 10px', borderBottom: '1px dashed var(--line-dk)', minWidth: 80, textAlign: 'right' }}>
                       ${t.value % 1 === 0 ? t.value : t.value.toFixed(2)}
                     </button>
                   )}

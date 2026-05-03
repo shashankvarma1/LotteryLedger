@@ -12,7 +12,7 @@ function calcTotal(sold: number, price: number) { return parseFloat((sold * pric
 
 // ─── PDF ─────────────────────────────────────────────────────────────────────
 
-function printSession(session: Session, books: Book[], tickets: TicketValue[]) {
+function printSession(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[]) {
   const dateStr   = new Date(session.session_date + 'T00:00:00').toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
@@ -22,7 +22,7 @@ function printSession(session: Session, books: Book[], tickets: TicketValue[]) {
   let grandAmt  = 0
 
   const rows = tickets.map((ticket, i) => {
-    const book  = books[i]
+    const book  = bookMap[i + 1]
     const price = ticket.value
     if (!book || book.is_returned) {
       return `<tr style="opacity:.4"><td>${i+1}</td><td>#${ticket.ticket_number}</td><td style="text-align:right">$${price}</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>`
@@ -71,8 +71,7 @@ footer{margin-top:20px;font-size:8px;color:#bbb;border-top:1px solid #eee;paddin
   <tbody>${rows}</tbody>
   <tfoot><tr>
     <td colspan="5" class="l" style="font-size:8px;color:#888">TOTAL</td>
-    <td>${grandSold}</td>
-    <td class="green">$${grandAmt.toFixed(2)}</td>
+    <td>${grandSold}</td><td class="green">$${grandAmt.toFixed(2)}</td>
   </tr></tfoot>
 </table>
 <div class="summary">
@@ -172,30 +171,20 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
   )
 }
 
-// ─── Inline editable number cell ──────────────────────────────────────────────
+// ─── Inline number input ──────────────────────────────────────────────────────
 
 function NumInput({
   value,
   placeholder,
   onSave,
-  autoFocus,
 }: {
   value: number | null
   placeholder?: string
   onSave: (v: number | null) => void
-  autoFocus?: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft,   setDraft]   = useState('')
   const ref = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (autoFocus && value === null) {
-      setEditing(true)
-      setDraft('')
-      setTimeout(() => { ref.current?.focus() }, 50)
-    }
-  }, [])
 
   function startEdit() {
     setEditing(true)
@@ -219,7 +208,7 @@ function NumInput({
         onBlur={commit}
         onKeyDown={e => {
           if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
-          if (e.key === 'Escape') { setEditing(false) }
+          if (e.key === 'Escape') setEditing(false)
         }}
         style={{
           width: '100%', height: 44, padding: '0 6px',
@@ -253,7 +242,6 @@ function NumInput({
 export default function SessionPage({ params }: { params: { id: string } }) {
   const [session,    setSession]    = useState<Session | null>(null)
   const [tickets,    setTickets]    = useState<TicketValue[]>([])
-  // bookMap: ticket_number -> book row
   const [bookMap,    setBookMap]    = useState<Record<number, Book>>({})
   const [loading,    setLoading]    = useState(true)
   const [toast,      setToast]      = useState('')
@@ -270,7 +258,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       if (!redirected.current) { redirected.current = true; window.location.href = '/auth' }
       return
     }
-
     const sid = localStorage.getItem('selected_store_id')
     if (!sid) { window.location.href = '/stores'; return }
 
@@ -282,60 +269,45 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     if (sess) setSession(sess)
     if (tvs)  setTickets(tvs)
-
-    // Map books by row_number (which corresponds to ticket index)
     if (bks) {
       const map: Record<number, Book> = {}
       bks.forEach(b => { map[b.row_number] = b })
       setBookMap(map)
     }
-
     setLoading(false)
   }, [params.id])
 
   useEffect(() => { load() }, [load])
 
-  // Save start/end for a ticket row
-  async function saveBookField(
-    ticketIndex: number,
-    field: 'start_num' | 'end_num',
-    value: number | null
-  ) {
+  async function saveBookField(ticketIndex: number, field: 'start_num' | 'end_num', value: number | null) {
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
 
     const existingBook = bookMap[ticketIndex + 1]
+    const ticket       = tickets[ticketIndex]
 
     if (existingBook) {
-      // Update existing book
       const updates = { [field]: value }
       const { data } = await supabase.from('books').update(updates).eq('id', existingBook.id).select().single()
       if (data) {
         setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
+        // Show toast if both values are now set
+        const updated = { ...existingBook, [field]: value }
+        if (updated.start_num !== null && updated.end_num !== null && ticket) {
+          const s = calcSold(updated.start_num, updated.end_num)
+          const t = calcTotal(s, ticket.value)
+          showToast(`#${ticket.ticket_number} → ${s} sold · $${t.toFixed(2)}`)
+        }
       }
     } else {
-      // Create new book row
       const insertData: Record<string, unknown> = {
-        session_id:  session.id,
-        row_number:  ticketIndex + 1,
-        is_returned: false,
-        user_id:     auth.user.id,
-        start_num:   null,
-        end_num:     null,
-        [field]:     value,
+        session_id: session.id, row_number: ticketIndex + 1,
+        is_returned: false, user_id: auth.user.id,
+        start_num: null, end_num: null,
+        [field]: value,
       }
       const { data } = await supabase.from('books').insert(insertData).select().single()
-      if (data) {
-        setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
-      }
-    }
-
-    const ticket = tickets[ticketIndex]
-    const book   = { ...existingBook, [field]: value }
-    if (book.start_num !== null && book.end_num !== null && ticket) {
-      const s = calcSold(book.start_num, book.end_num)
-      const t = calcTotal(s, ticket.value)
-      if (s > 0) showToast(`#${ticket.ticket_number} → ${s} sold · $${t.toFixed(2)}`)
+      if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     }
   }
 
@@ -360,7 +332,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     showToast(newReturned ? 'Marked as returned' : 'Unmarked')
   }
 
-  // Totals
+  // Totals — include rows where sold = 0 (start = end)
   const grandSold = tickets.reduce((sum, ticket, idx) => {
     const book = bookMap[idx + 1]
     if (!book || book.is_returned || book.start_num === null || book.end_num === null) return sum
@@ -391,7 +363,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   return (
     <div style={{ maxWidth: 600, margin: '0 auto', paddingBottom: 40 }}>
 
-      {/* Header */}
       <header className="hdr">
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <a href="/?noredirect=1" style={{ fontSize: 20, color: 'var(--ink)', textDecoration: 'none', padding: '4px 8px 4px 0', lineHeight: 1 }}>←</a>
@@ -402,13 +373,12 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
           {enteredCount > 0 && (
-            <button className="btn btn-sm" onClick={() => printSession(session, Object.values(bookMap), tickets)}>⎙ PDF</button>
+            <button className="btn btn-sm" onClick={() => printSession(session, bookMap, tickets)}>⎙ PDF</button>
           )}
           <a href="/history" className="btn btn-sm">HISTORY</a>
         </div>
       </header>
 
-      {/* Summary */}
       <div className="sbar">
         <div className="sbar-cell">
           <div className="sbar-lbl">Entered</div>
@@ -424,15 +394,12 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* No tickets warning */}
       {tickets.length === 0 && (
         <div style={{ margin: '16px', padding: '12px 14px', background: 'var(--red-lt)', border: '1px solid var(--red)', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--red)' }}>
-          ⚠ No tickets configured for this store. Go to{' '}
-          <a href="/settings" style={{ color: 'var(--red)', fontWeight: 700 }}>Settings</a> first.
+          ⚠ No tickets configured. Go to <a href="/settings" style={{ color: 'var(--red)', fontWeight: 700 }}>Settings</a> first.
         </div>
       )}
 
-      {/* Ledger Table — all tickets shown, tap Start/End to enter */}
       {tickets.length > 0 && (
         <div className="tbl-wrap">
           <table className="tbl" style={{ tableLayout: 'auto' }}>
@@ -453,9 +420,10 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 const isReturned = book?.is_returned ?? false
                 const startNum   = book?.start_num ?? null
                 const endNum     = book?.end_num   ?? null
-                const s          = (!isReturned && startNum !== null && endNum !== null) ? calcSold(startNum, endNum) : null
+                const hasData    = startNum !== null && endNum !== null
+                const s          = hasData && !isReturned ? calcSold(startNum!, endNum!) : null
                 const t          = s !== null ? calcTotal(s, ticket.value) : null
-                const hasData    = startNum !== null || endNum !== null
+                const isFinished = ticket.value === 0
 
                 return (
                   <tr
@@ -466,10 +434,15 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                     {/* Ticket number */}
                     <td>
                       <div style={{ height: 44, display: 'flex', alignItems: 'center', paddingLeft: 10, gap: 6 }}>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: 'var(--ink)' }}>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: isFinished ? 'var(--ink-faint)' : 'var(--ink)' }}>
                           #{ticket.ticket_number}
                         </span>
-                        {!hasData && !isReturned && (
+                        {isFinished && !isReturned && (
+                          <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--ink-faint)', background: 'var(--line)', padding: '2px 5px', letterSpacing: '.04em' }}>
+                            FINISHED
+                          </span>
+                        )}
+                        {!hasData && !isReturned && !isFinished && (
                           <span style={{ fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.04em' }}>tap to enter</span>
                         )}
                       </div>
@@ -478,47 +451,39 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                     {/* Price */}
                     <td>
                       <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6 }}>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--green)', fontWeight: 700 }}>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: isFinished ? 'var(--ink-faint)' : 'var(--green)', fontWeight: 700 }}>
                           ${ticket.value % 1 === 0 ? ticket.value : ticket.value.toFixed(2)}
                         </span>
                       </div>
                     </td>
 
-                    {/* Start — inline editable */}
+                    {/* Start */}
                     <td style={{ minWidth: 64 }}>
                       {isReturned
                         ? <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 8px', color: 'var(--ink-faint)' }}>—</div>
-                        : <NumInput
-                            value={startNum}
-                            placeholder="start"
-                            onSave={v => saveBookField(idx, 'start_num', v)}
-                          />
+                        : <NumInput value={startNum} placeholder="start" onSave={v => saveBookField(idx, 'start_num', v)} />
                       }
                     </td>
 
-                    {/* End — inline editable */}
+                    {/* End */}
                     <td style={{ minWidth: 64 }}>
                       {isReturned
                         ? <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 8px', color: 'var(--ink-faint)' }}>—</div>
-                        : <NumInput
-                            value={endNum}
-                            placeholder="end"
-                            onSave={v => saveBookField(idx, 'end_num', v)}
-                          />
+                        : <NumInput value={endNum} placeholder="end" onSave={v => saveBookField(idx, 'end_num', v)} />
                       }
                     </td>
 
-                    {/* Sold — auto computed */}
+                    {/* Sold */}
                     <td>
                       <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6, fontFamily: 'var(--mono)', fontSize: 15, color: s === 0 ? 'var(--ink-faint)' : 'var(--ink)' }}>
                         {isReturned ? '—' : (s !== null ? s : '')}
                       </div>
                     </td>
 
-                    {/* Total — auto computed */}
+                    {/* Total — show $0.00 when sold = 0 and data is entered */}
                     <td>
-                      <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6, fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700, color: t && t > 0 ? 'var(--green)' : 'var(--ink-faint)' }}>
-                        {isReturned ? '—' : (t && t > 0 ? '$' + t.toFixed(2) : '')}
+                      <div style={{ height: 44, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 6, fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700, color: t !== null && t > 0 ? 'var(--green)' : 'var(--ink-faint)' }}>
+                        {isReturned ? '—' : (t !== null ? '$' + t.toFixed(2) : '')}
                       </div>
                     </td>
 
@@ -542,9 +507,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 <td colSpan={4} style={{ textAlign: 'left', fontFamily: 'var(--sans)', fontSize: 9, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
                   TOTAL
                 </td>
-                <td style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700 }}>{grandSold || ''}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700 }}>{grandSold}</td>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: 'var(--green)' }}>
-                  {grandAmt > 0 ? '$' + grandAmt.toFixed(2) : ''}
+                  ${grandAmt.toFixed(2)}
                 </td>
                 <td />
               </tr>
@@ -553,7 +518,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* SR50 toggle */}
       <div style={{ borderTop: '1px solid var(--line)', marginTop: 8 }}>
         <button
           className={`btn ${showReport ? '' : 'btn-ghost'}`}

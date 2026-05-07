@@ -5,7 +5,6 @@ export const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
 
-// Auto redirect to login if session expires
 if (typeof window !== 'undefined') {
   supabase.auth.onAuthStateChange((event) => {
     if (event === 'SIGNED_OUT') {
@@ -34,6 +33,7 @@ export type Session = {
   user_id: string
   store_id: string
   created_at: string
+  ticket_revenue: number
 }
 
 export type Book = {
@@ -44,4 +44,26 @@ export type Book = {
   end_num: number | null
   is_returned: boolean
   user_id: string
+}
+
+export type TicketValue = {
+  ticket_number: number
+  value: number
+  book_size: number
+}
+
+export type Profile = {
+  id: string
+  email: string
+  role: 'admin' | 'user'
+  display_name: string | null
+  created_at: string
+}
+
+export type StoreAccess = {
+  id: string
+  store_id: string
+  user_id: string
+  granted_by: string
+  created_at: string
 }

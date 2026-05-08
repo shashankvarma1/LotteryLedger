@@ -9,10 +9,11 @@ type SessionWithStats = Session & {
   total_revenue?: number
 }
 
-function calcSoldWrapped(start: number, end: number, bookSize: number): number {
+function calcSoldSafe(start: number, end: number, bookSize: number | null): number {
   if (start === end) return 0
-  if (end > start)   return end - start
-  return (bookSize - start) + end
+  if (end > start) return end - start
+  if (bookSize && bookSize > 0) return (bookSize - start) + end
+  return 0
 }
 
 function DeleteModal({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
@@ -51,34 +52,36 @@ export default function HistoryPage() {
       if (!sid) { window.location.href = '/stores'; return }
       setStoreName(sname || 'Store')
 
-      const { data: sessionList } = await supabase.from('sessions').select('*')
-        .eq('user_id', session.user.id).eq('store_id', sid)
+      const { data: sessionList } = await supabase
+        .from('sessions').select('*')
+        .eq('store_id', sid)
         .order('session_date', { ascending: false })
 
       if (!sessionList) { setLoading(false); return }
 
-      // Load ticket values once
-      const { data: tvs } = await supabase.from('ticket_values').select('*')
-        .eq('user_id', session.user.id).eq('store_id', sid).order('ticket_number')
+      const { data: tvs } = await supabase
+        .from('ticket_values').select('*')
+        .eq('store_id', sid).order('ticket_number')
 
       const enriched = await Promise.all(sessionList.map(async (s: Session) => {
-        const { data: books } = await supabase.from('books').select('*')
-          .eq('session_id', s.id).eq('user_id', session.user.id).order('row_number')
+        const { data: books } = await supabase
+          .from('books').select('*')
+          .eq('session_id', s.id).order('row_number')
 
         const active = (books || []).filter((b: { is_returned: boolean }) => !b.is_returned)
 
         const totalSold = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
           const ticket   = (tvs || [])[b.row_number - 1]
-          const bookSize = ticket?.book_size ?? 100
-          const sold     = calcSoldWrapped(b.start_num ?? 0, b.end_num ?? 0, bookSize)
+          const bookSize = ticket?.book_size ?? null
+          const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
           return sum + sold
         }, 0)
 
         const totalRevenue = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
           const ticket   = (tvs || [])[b.row_number - 1]
           const price    = ticket?.value    ?? 0
-          const bookSize = ticket?.book_size ?? 100
-          const sold     = calcSoldWrapped(b.start_num ?? 0, b.end_num ?? 0, bookSize)
+          const bookSize = ticket?.book_size ?? null
+          const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
           return parseFloat((sum + sold * price).toFixed(2))
         }, 0)
 

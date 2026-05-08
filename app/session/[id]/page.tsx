@@ -8,8 +8,6 @@ type TicketValue = { ticket_number: number; value: number; book_size: number }
 
 function n(v: number | null | undefined) { return v ?? 0 }
 
-// Wrap-around sold calculation
-// e.g. start=48, end=2, bookSize=50 → (50-48)+2 = 4
 function calcSold(start: number, end: number, bookSize: number): number {
   if (start === end) return 0
   if (end > start)   return end - start
@@ -116,10 +114,10 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
     tfoot tr td { border-top: 2px solid #0f172a; border-bottom: none; font-weight: 700; padding-top: 10px; font-family: 'DM Mono', monospace; font-size: 13px; background: #f8fafc; }
     .fin-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 24px; }
     .fin-box { border-radius: 10px; padding: 12px 14px; text-align: center; }
-    .fin-box.revenue  { background: #f0fdf4; border: 1px solid #bbf7d0; }
-    .fin-box.sales    { background: #f0f9ff; border: 1px solid #bae6fd; }
+    .fin-box.revenue { background: #f0fdf4; border: 1px solid #bbf7d0; }
+    .fin-box.sales { background: #f0f9ff; border: 1px solid #bae6fd; }
     .fin-box.combined { background: #fefce8; border: 2px solid #fbbf24; }
-    .fin-box.cashes   { background: #fff1f2; border: 1px solid #fecdd3; }
+    .fin-box.cashes { background: #fff1f2; border: 1px solid #fecdd3; }
     .fin-lbl { font-family: 'DM Mono', monospace; font-size: 8px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; line-height: 1.4; }
     .fin-lbl.green { color: #059669; } .fin-lbl.blue { color: #0284c7; } .fin-lbl.gold { color: #b45309; } .fin-lbl.red { color: #e11d48; }
     .fin-val { font-family: 'DM Mono', monospace; font-size: 17px; font-weight: 700; }
@@ -245,7 +243,8 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
     return (
       <div style={{ marginBottom: 14 }}>
         <label className="field-label">{label}</label>
-        <input type="number" inputMode="decimal" step="0.01"
+        <input
+          type="number" inputMode="decimal" step="0.01"
           value={draft[key] !== undefined ? String(draft[key]) : String(merged[key] ?? '')}
           onChange={e => setDraft(p => ({ ...p, [key]: e.target.value === '' ? 0 : Number(e.target.value) }))}
           onBlur={save}
@@ -278,7 +277,7 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
           <div className="divider" />
           <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 14 }}>Enter from SR50 receipt</div>
           {fi('sr50_net_sales', 'Net Sales')}
-          {fi('sr50_cashes',    'SR50 Cashes')}
+          {fi('sr50_cashes', 'SR50 Cashes')}
         </>)}
         {tab === 'ir34' && (<>
           <div className="report-grid" style={{ gridTemplateColumns: '1fr' }}>
@@ -295,17 +294,19 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
 
 // ─── NumInput ─────────────────────────────────────────────────────────────────
 
-function NumInput({ value, placeholder, onSave, onEnter }: {
+function NumInput({ value, placeholder, onSave, onEnter, disabled }: {
   value: number | null
   placeholder?: string
   onSave: (v: number | null) => void
   onEnter?: () => void
+  disabled?: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft,   setDraft]   = useState('')
   const ref = useRef<HTMLInputElement>(null)
 
   function startEdit() {
+    if (disabled) return
     setEditing(true)
     setDraft(value !== null ? String(value) : '')
     setTimeout(() => { ref.current?.focus(); ref.current?.select() }, 20)
@@ -317,7 +318,7 @@ function NumInput({ value, placeholder, onSave, onEnter }: {
     onSave(isNaN(parsed as number) ? null : parsed)
   }
 
-  if (editing) {
+  if (editing && !disabled) {
     return (
       <input ref={ref} type="number" inputMode="numeric"
         value={draft} onChange={e => setDraft(e.target.value)}
@@ -334,14 +335,17 @@ function NumInput({ value, placeholder, onSave, onEnter }: {
   return (
     <div onClick={startEdit} style={{
       height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-      padding: '0 10px', cursor: 'text', fontFamily: 'var(--mono)', fontSize: 15,
+      padding: '0 10px',
+      cursor: disabled ? 'default' : 'text',
+      fontFamily: 'var(--mono)', fontSize: 15,
       color: value !== null ? 'var(--ink)' : 'var(--ink-ghost)',
       fontWeight: value !== null ? 600 : 400,
+      opacity: disabled && value === null ? 0.4 : 1,
     }}>
       {value !== null
         ? <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             {value}
-            <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>
+            {!disabled && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>}
           </span>
         : (placeholder || '—')
       }
@@ -351,29 +355,35 @@ function NumInput({ value, placeholder, onSave, onEnter }: {
 
 // ─── Notes Input ──────────────────────────────────────────────────────────────
 
-function NotesInput({ session, onSave }: { session: Session; onSave: (s: Session) => void }) {
+function NotesInput({ session, onSave, disabled }: {
+  session: Session
+  onSave: (s: Session) => void
+  disabled?: boolean
+}) {
   const [editing, setEditing] = useState(false)
   const [draft,   setDraft]   = useState(session.notes || '')
   const [saving,  setSaving]  = useState(false)
   const ref = useRef<HTMLInputElement>(null)
 
   async function commit() {
+    if (disabled) return
     setEditing(false)
     if (draft === (session.notes || '')) return
     setSaving(true)
-    const { data } = await supabase.from('sessions').update({ notes: draft || null }).eq('id', session.id).select().single()
+    const { data } = await supabase.from('sessions')
+      .update({ notes: draft || null }).eq('id', session.id).select().single()
     if (data) onSave(data)
     setSaving(false)
   }
 
-  if (editing) {
+  if (editing && !disabled) {
     return (
       <input ref={ref} autoFocus type="text" value={draft}
         placeholder="Add a note for this session..."
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={e => {
-          if (e.key === 'Enter')  commit()
+          if (e.key === 'Enter') commit()
           if (e.key === 'Escape') { setEditing(false); setDraft(session.notes || '') }
         }}
         style={{ flex: 1, border: 'none', outline: 'none', background: 'rgba(240,165,0,0.06)', borderBottom: '1px solid var(--gold)', fontFamily: 'var(--sans)', fontSize: 12, color: 'var(--ink)', padding: '4px 8px', borderRadius: 4 }}
@@ -382,10 +392,12 @@ function NotesInput({ session, onSave }: { session: Session; onSave: (s: Session
   }
 
   return (
-    <div onClick={() => { setEditing(true); setTimeout(() => ref.current?.focus(), 20) }}
-      style={{ flex: 1, cursor: 'text', fontFamily: 'var(--sans)', fontSize: 12, padding: '4px', color: session.notes ? 'var(--ink-mid)' : 'var(--ink-ghost)', display: 'flex', alignItems: 'center', gap: 6 }}>
-      {saving ? 'Saving...' : (session.notes || 'Add note...')}
-      {!saving && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>}
+    <div
+      onClick={disabled ? undefined : () => { setEditing(true); setTimeout(() => ref.current?.focus(), 20) }}
+      style={{ flex: 1, cursor: disabled ? 'default' : 'text', fontFamily: 'var(--sans)', fontSize: 12, padding: '4px', color: session.notes ? 'var(--ink-mid)' : 'var(--ink-ghost)', display: 'flex', alignItems: 'center', gap: 6, opacity: disabled ? 0.7 : 1 }}
+    >
+      {saving ? 'Saving...' : (session.notes || (disabled ? '—' : 'Add note...'))}
+      {!saving && !disabled && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>✎</span>}
     </div>
   )
 }
@@ -400,6 +412,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [toast,      setToast]      = useState('')
   const [showReport, setShowReport] = useState(false)
   const [isOnline,   setIsOnline]   = useState(true)
+  const [isAdmin,    setIsAdmin]    = useState(false)
   const redirected    = useRef(false)
   const startCellRefs = useRef<(HTMLDivElement | null)[]>([])
   const endCellRefs   = useRef<(HTMLDivElement | null)[]>([])
@@ -435,10 +448,15 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const sid = localStorage.getItem('selected_store_id')
     if (!sid) { window.location.href = '/stores'; return }
 
+    // Check if user is admin
+    const { data: profile } = await supabase
+      .from('profiles').select('role').eq('id', auth.user.id).single()
+    setIsAdmin(profile?.role === 'admin')
+
     const [{ data: sess }, { data: bks }, { data: tvs }] = await Promise.all([
-      supabase.from('sessions').select('*').eq('id', params.id).eq('user_id', auth.user.id).single(),
-      supabase.from('books').select('*').eq('session_id', params.id).eq('user_id', auth.user.id).order('row_number'),
-      supabase.from('ticket_values').select('*').eq('user_id', auth.user.id).eq('store_id', sid).order('ticket_number'),
+      supabase.from('sessions').select('*').eq('id', params.id).single(),
+      supabase.from('books').select('*').eq('session_id', params.id).order('row_number'),
+      supabase.from('ticket_values').select('*').eq('store_id', sid).order('ticket_number'),
     ])
 
     if (sess) setSession(sess)
@@ -460,7 +478,8 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const ticket       = tickets[ticketIndex]
 
     if (existingBook) {
-      const { data } = await supabase.from('books').update({ [field]: value }).eq('id', existingBook.id).select().single()
+      const { data } = await supabase.from('books')
+        .update({ [field]: value }).eq('id', existingBook.id).select().single()
       if (data) {
         setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
         const updated  = { ...existingBook, [field]: value }
@@ -492,7 +511,8 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const newReturned  = !existingBook?.is_returned
 
     if (existingBook) {
-      const { data } = await supabase.from('books').update({ is_returned: newReturned }).eq('id', existingBook.id).select().single()
+      const { data } = await supabase.from('books')
+        .update({ is_returned: newReturned }).eq('id', existingBook.id).select().single()
       if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     } else {
       const { data } = await supabase.from('books').insert({
@@ -518,12 +538,16 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const yDate = yesterday.toISOString().split('T')[0]
     const sid   = localStorage.getItem('selected_store_id')
 
-    const { data: prevSession } = await supabase.from('sessions').select('id')
-      .eq('user_id', auth.user.id).eq('store_id', sid || '').eq('session_date', yDate).single()
+    const { data: prevSession } = await supabase
+      .from('sessions').select('id')
+      .eq('store_id', sid || '').eq('session_date', yDate).maybeSingle()
+
     if (!prevSession) { showToast('No session found for yesterday'); return }
 
-    const { data: prevBooks } = await supabase.from('books').select('*')
-      .eq('session_id', prevSession.id).eq('user_id', auth.user.id).order('row_number')
+    const { data: prevBooks } = await supabase
+      .from('books').select('*')
+      .eq('session_id', prevSession.id).order('row_number')
+
     if (!prevBooks || prevBooks.length === 0) { showToast("No data in yesterday's session"); return }
 
     let copied = 0
@@ -531,9 +555,11 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       const rowNum = prevBook.row_number
       if (prevBook.end_num === null) continue
       const existing = bookMap[rowNum]
+
       if (existing) {
         if (existing.start_num !== null) continue
-        const { data } = await supabase.from('books').update({ start_num: prevBook.end_num }).eq('id', existing.id).select().single()
+        const { data } = await supabase.from('books')
+          .update({ start_num: prevBook.end_num }).eq('id', existing.id).select().single()
         if (data) setBookMap(prev => ({ ...prev, [rowNum]: data }))
       } else {
         const { data } = await supabase.from('books').insert({
@@ -548,6 +574,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       }
       copied++
     }
+
     if (navigator.vibrate) navigator.vibrate([40, 30, 40])
     showToast(copied > 0 ? `✓ Copied ${copied} start numbers from yesterday` : 'Nothing to copy')
   }
@@ -568,7 +595,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     return parseFloat((sum + calcTotal(sold, ticket.value)).toFixed(2))
   }, 0)
 
-  // ── Save ticket_revenue to session (debounced) ──
+  // ── Save ticket_revenue (debounced) ──
   useEffect(() => {
     if (!session || loading) return
     if (grandAmt === n(session.ticket_revenue)) return
@@ -599,6 +626,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const sessionDate = new Date(session.session_date + 'T00:00:00')
   const isToday     = session.session_date === new Date().toISOString().split('T')[0]
 
+  // ── Lock logic: admin can always edit, users can only edit today ──
+  const isLocked = !isAdmin && !isToday
+
   return (
     <div style={{ maxWidth: 620, margin: '0 auto', paddingBottom: 80 }}>
 
@@ -615,10 +645,27 @@ export default function SessionPage({ params }: { params: { id: string } }) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {enteredCount > 0 && <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--emerald)' }}>✓ saved</span>}
+          {enteredCount > 0 && !isLocked && (
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--emerald)' }}>✓ saved</span>
+          )}
+          {isLocked && (
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--gold)', display: 'flex', alignItems: 'center', gap: 4 }}>
+              🔒 locked
+            </span>
+          )}
+          {isAdmin && !isToday && (
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--sky)' }}>admin</span>
+          )}
           <a href="/history" className="btn btn-ghost btn-sm">History</a>
         </div>
       </header>
+
+      {/* Locked banner for regular users */}
+      {isLocked && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 18px', background: 'rgba(240,165,0,0.06)', borderBottom: '1px solid var(--line-dk)', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--gold)', letterSpacing: '.04em' }}>
+          🔒 This session is from a previous day — view only. Only admins can edit past sessions.
+        </div>
+      )}
 
       <div className="sbar">
         <div className="sbar-cell">
@@ -638,8 +685,8 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       {/* Notes + Copy from yesterday */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line)' }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Note</span>
-        <NotesInput session={session} onSave={s => setSession(s)} />
-        {isToday && (
+        <NotesInput session={session} onSave={s => setSession(s)} disabled={isLocked} />
+        {!isLocked && (
           <button onClick={copyFromYesterday} className="btn btn-ghost btn-sm" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
             ⬆ Yesterday
           </button>
@@ -664,7 +711,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 <th>End</th>
                 <th>Sold</th>
                 <th>Total</th>
-                <th style={{ width: 40 }} />
+                {!isLocked && <th style={{ width: 40 }} />}
               </tr>
             </thead>
             <tbody>
@@ -681,7 +728,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
                 return (
                   <tr key={ticket.ticket_number} className={isReturned ? 'ret' : ''}
-                    style={{ background: !isReturned && !hasData && !isFinished ? 'rgba(240,165,0,0.03)' : undefined }}>
+                    style={{ background: !isReturned && !hasData && !isFinished && !isLocked ? 'rgba(240,165,0,0.03)' : undefined }}>
 
                     <td>
                       <div style={{ height: 46, display: 'flex', alignItems: 'center', paddingLeft: 12, gap: 8 }}>
@@ -689,7 +736,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                           #{ticket.ticket_number}
                         </span>
                         {isFinished && !isReturned && <span className="badge badge-muted">DONE</span>}
-                        {!hasData && !isReturned && !isFinished && <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>tap</span>}
+                        {!hasData && !isReturned && !isFinished && !isLocked && (
+                          <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>tap</span>
+                        )}
                       </div>
                     </td>
 
@@ -707,6 +756,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                         : <NumInput value={startNum} placeholder="start"
                             onSave={v => saveBookField(idx, 'start_num', v)}
                             onEnter={() => endCellRefs.current[idx]?.click()}
+                            disabled={isLocked}
                           />
                       }
                     </td>
@@ -717,6 +767,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                         : <NumInput value={endNum} placeholder="end"
                             onSave={v => saveBookField(idx, 'end_num', v)}
                             onEnter={() => startCellRefs.current[idx + 1]?.click()}
+                            disabled={isLocked}
                           />
                       }
                     </td>
@@ -733,12 +784,14 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                       </div>
                     </td>
 
-                    <td>
-                      <button className="xbtn" onClick={() => toggleReturn(idx)}
-                        style={{ color: isReturned ? 'var(--emerald)' : 'var(--ink-ghost)', fontSize: isReturned ? 13 : 18 }}>
-                        {isReturned ? '↩' : '—'}
-                      </button>
-                    </td>
+                    {!isLocked && (
+                      <td>
+                        <button className="xbtn" onClick={() => toggleReturn(idx)}
+                          style={{ color: isReturned ? 'var(--emerald)' : 'var(--ink-ghost)', fontSize: isReturned ? 13 : 18 }}>
+                          {isReturned ? '↩' : '—'}
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 )
               })}
@@ -748,26 +801,28 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 <td colSpan={4} style={{ textAlign: 'left', color: 'var(--ink-faint)', fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase' }}>TOTAL</td>
                 <td style={{ fontFamily: 'var(--mono)', fontWeight: 700 }}>{grandSold}</td>
                 <td style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--emerald)' }}>${grandAmt.toFixed(2)}</td>
-                <td />
+                {!isLocked && <td />}
               </tr>
             </tfoot>
           </table>
         </div>
       )}
 
-      {/* SR50 / IR34 toggle */}
-      <div style={{ marginTop: 8, borderTop: '1px solid var(--line)' }}>
-        <button className={`btn ${showReport ? 'btn-gold' : 'btn-ghost'}`}
-          onClick={() => setShowReport(v => !v)}
-          style={{ width: '100%', padding: '13px', fontSize: 13, borderLeft: 'none', borderRight: 'none', borderBottom: 'none', borderRadius: 0 }}>
-          {showReport ? '▾' : '▸'} SR50 / IR34
-        </button>
-      </div>
+      {/* SR50 / IR34 — editable only when not locked */}
+      {!isLocked && (
+        <div style={{ marginTop: 8, borderTop: '1px solid var(--line)' }}>
+          <button className={`btn ${showReport ? 'btn-gold' : 'btn-ghost'}`}
+            onClick={() => setShowReport(v => !v)}
+            style={{ width: '100%', padding: '13px', fontSize: 13, borderLeft: 'none', borderRight: 'none', borderBottom: 'none', borderRadius: 0 }}>
+            {showReport ? '▾' : '▸'} SR50 / IR34
+          </button>
+        </div>
+      )}
 
-      {showReport && <ReportPanel session={session} onSave={s => setSession(s)} />}
+      {!isLocked && showReport && <ReportPanel session={session} onSave={s => setSession(s)} />}
 
-      {/* Final total banner */}
-      {hasFinalData && !showReport && (
+      {/* Final total — editable when not locked */}
+      {!isLocked && hasFinalData && !showReport && (
         <div onClick={() => setShowReport(true)} style={{ cursor: 'pointer' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
             {[
@@ -793,7 +848,31 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {!hasFinalData && !showReport && grandAmt > 0 && (
+      {/* Final total — read only when locked */}
+      {isLocked && hasFinalData && (
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
+            {[
+              { label: 'Tickets',     val: `$${grandAmt.toFixed(2)}`,    color: 'var(--ink)' },
+              { label: '+ Net Sales', val: `$${sr50NetSales.toFixed(2)}`, color: 'var(--sky)' },
+              { label: '− SR50',      val: `$${sr50Cashes.toFixed(2)}`,  color: 'var(--rose)' },
+              { label: '− IR34',      val: `$${ir34Cashes.toFixed(2)}`,  color: 'var(--rose)' },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{ textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color }}>{val}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ padding: '14px 18px', background: finalTotal >= 0 ? 'var(--emerald-lt)' : 'var(--rose-lt)', borderTop: `1px solid ${finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)'}` }}>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', marginBottom: 4 }}>Final Total</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 30, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', lineHeight: 1 }}>${finalTotal.toFixed(2)}</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', marginTop: 5 }}>Tickets + Net Sales − SR50 − IR34 Cashes</div>
+          </div>
+        </div>
+      )}
+
+      {!isLocked && !hasFinalData && !showReport && grandAmt > 0 && (
         <div onClick={() => setShowReport(true)} style={{ padding: '14px 18px', background: 'var(--card)', borderTop: '1px solid var(--line-dk)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
           <div>
             <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--gold)', letterSpacing: '.08em', textTransform: 'uppercase', marginBottom: 4 }}>Enter SR50 &amp; IR34</div>
@@ -803,12 +882,12 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* Fixed bottom PDF button */}
+      {/* PDF button — always visible */}
       {enteredCount > 0 && (
         <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, padding: '12px 18px', background: 'var(--navy-glass)', backdropFilter: 'blur(12px)', borderTop: '1px solid var(--line-dk)', display: 'flex', gap: 10, zIndex: 50, maxWidth: 620, margin: '0 auto' }}>
           <button className="btn btn-gold" onClick={() => printSession(session, bookMap, tickets)}
             style={{ flex: 1, padding: '14px', fontSize: 14, fontWeight: 700, borderRadius: 12 }}>
-            ⎙ Save &amp; Print PDF
+            ⎙ {isLocked ? 'Print PDF' : 'Save & Print PDF'}
           </button>
         </div>
       )}

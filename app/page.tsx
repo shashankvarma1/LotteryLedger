@@ -5,10 +5,13 @@ import type { Session } from '@/lib/supabase'
 
 type SessionWithRevenue = Session & { computed_revenue: number }
 
-function calcSoldWrapped(start: number, end: number, bookSize: number): number {
+function calcSoldSafe(start: number, end: number, bookSize: number | null): number {
   if (start === end) return 0
   if (end > start) return end - start
-  return (bookSize - start) + end
+  // Only wrap-around if book_size is explicitly set and not the default 100
+  if (bookSize && bookSize > 0) return (bookSize - start) + end
+  // No book_size set — return 0 to avoid wrong calculations on old data
+  return 0
 }
 
 export default function HomePage() {
@@ -34,14 +37,13 @@ export default function HomePage() {
       if (!sid) { window.location.href = '/stores'; return }
       setStoreId(sid); setStoreName(sname || 'Store')
 
-      // Load sessions
-      const { data: sessionList } = await supabase.from('sessions').select('*')
+      const { data: sessionList } = await supabase
+        .from('sessions').select('*')
         .eq('user_id', session.user.id).eq('store_id', sid)
         .order('session_date', { ascending: false })
 
       const list: Session[] = sessionList || []
 
-      // Auto redirect to today if exists
       const noRedirect = new URLSearchParams(window.location.search).get('noredirect')
       if (!noRedirect) {
         const todayS = list.find((s: Session) => s.session_date === today)
@@ -52,33 +54,44 @@ export default function HomePage() {
         }
       }
 
-      // Load ticket values for this store once
-      const { data: tvs } = await supabase.from('ticket_values').select('*')
-        .eq('user_id', session.user.id).eq('store_id', sid).order('ticket_number')
+      // Load ticket values by store_id only
+      const { data: tvs } = await supabase
+        .from('ticket_values').select('*')
+        .eq('store_id', sid).order('ticket_number')
 
-      // For each of the 5 recent sessions, load books and compute revenue
       const recent = list.slice(0, 5)
+
       const enriched = await Promise.all(recent.map(async (s) => {
-        // Use saved ticket_revenue if already populated
-        if (s.ticket_revenue && s.ticket_revenue > 0) {
-          return { ...s, computed_revenue: s.ticket_revenue }
-        }
-        // Otherwise compute from books using wrap-around logic
-        const { data: books } = await supabase.from('books').select('*')
-          .eq('session_id', s.id).eq('user_id', session.user.id)
-        const active = (books || []).filter((b: { is_returned: boolean }) => !b.is_returned)
-        const revenue = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-          const ticket   = (tvs || [])[b.row_number - 1]
-          const price    = ticket?.value    ?? 0
-          const bookSize = ticket?.book_size ?? 100
-          const sold     = calcSoldWrapped(b.start_num ?? 0, b.end_num ?? 0, bookSize)
-          return parseFloat((sum + sold * price).toFixed(2))
-        }, 0)
+        // Always recompute from books — don't trust cached ticket_revenue
+        // until book_size is properly configured for all tickets
+        const { data: books } = await supabase
+          .from('books').select('*')
+          .eq('session_id', s.id)
+
+        const active = (books || []).filter(
+          (b: { is_returned: boolean }) => !b.is_returned
+        )
+
+        const revenue = active.reduce(
+          (sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
+            const ticket = (tvs || [])[b.row_number - 1]
+            const price  = ticket?.value ?? 0
+            // Only use wrap-around if book_size is explicitly set and not default 100
+            const bookSize = (ticket?.book_size && ticket.book_size !== 100)
+              ? ticket.book_size
+              : null
+            const start = b.start_num ?? 0
+            const end   = b.end_num   ?? 0
+            const sold  = calcSoldSafe(start, end, bookSize)
+            return parseFloat((sum + sold * price).toFixed(2))
+          },
+          0
+        )
+
         return { ...s, computed_revenue: revenue }
       }))
 
-      // Fill rest of sessions without revenue computation
-      const rest = list.slice(5).map(s => ({ ...s, computed_revenue: s.ticket_revenue ?? 0 }))
+      const rest = list.slice(5).map(s => ({ ...s, computed_revenue: 0 }))
       setSessions([...enriched, ...rest])
       setLoading(false)
     })
@@ -100,10 +113,8 @@ export default function HomePage() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) { window.location.href = '/auth'; return }
 
-      // ── Use maybeSingle() instead of single() to avoid 406 error ──
       const { data: existing, error: checkErr } = await supabase
-        .from('sessions')
-        .select('id')
+        .from('sessions').select('id')
         .eq('store_id', storeId)
         .eq('session_date', today)
         .eq('user_id', session.user.id)
@@ -121,16 +132,13 @@ export default function HomePage() {
       }
 
       const { data: newSession, error: insertErr } = await supabase
-        .from('sessions')
-        .insert({
+        .from('sessions').insert({
           session_date:     today,
           price_per_ticket: 1,
           user_id:          session.user.id,
           store_id:         storeId,
           ticket_revenue:   0,
-        })
-        .select()
-        .single()
+        }).select().single()
 
       if (insertErr) {
         setCreateError(`Could not create session: ${insertErr.message}`)
@@ -191,14 +199,12 @@ export default function HomePage() {
           {creating ? 'Opening...' : "Start Today's Ledger →"}
         </button>
 
-        {/* Error message */}
         {createError && (
           <div style={{ marginTop: 12, padding: '12px 16px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 12, color: 'var(--rose)', fontFamily: 'var(--mono)' }}>
             ⚠ {createError}
           </div>
         )}
 
-        {/* Recent sessions */}
         {sessions.length > 0 && (
           <div style={{ marginTop: 40 }}>
             <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 14 }}>

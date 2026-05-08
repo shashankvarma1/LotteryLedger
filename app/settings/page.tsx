@@ -4,8 +4,6 @@ import { supabase } from '@/lib/supabase'
 
 type TV = { ticket_number: number; value: number; book_size: number }
 
-// ─── Inline tap-to-edit cell (same pattern as session page NumInput) ──────────
-
 function InlineEdit({ value, prefix, onSave, onEnter, color }: {
   value: number
   prefix?: string
@@ -47,23 +45,19 @@ function InlineEdit({ value, prefix, onSave, onEnter, color }: {
           textAlign: 'right', border: 'none',
           background: 'rgba(240,165,0,0.08)',
           outline: '2px solid var(--gold)',
-          color: 'var(--ink)',
-          borderRadius: 0,
+          color: 'var(--ink)', borderRadius: 0,
         }}
       />
     )
   }
 
   return (
-    <div
-      onClick={startEdit}
-      style={{
-        height: 48, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        padding: '0 10px', cursor: 'text',
-        fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700,
-        color: color || 'var(--ink)',
-      }}
-    >
+    <div onClick={startEdit} style={{
+      height: 48, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+      padding: '0 10px', cursor: 'text',
+      fontFamily: 'var(--mono)', fontSize: 15, fontWeight: 700,
+      color: color || 'var(--ink)',
+    }}>
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         {prefix && <span style={{ fontSize: 12, fontWeight: 400, opacity: .6 }}>{prefix}</span>}
         {value % 1 === 0 ? value : value.toFixed(2)}
@@ -76,7 +70,7 @@ function InlineEdit({ value, prefix, onSave, onEnter, color }: {
 export default function SettingsPage() {
   const [tickets,    setTickets]    = useState<TV[]>([])
   const [loading,    setLoading]    = useState(true)
-  const [userId,     setUserId]     = useState<string | null>(null)
+  const [ownerUserId,setOwnerUserId]= useState<string | null>(null) // store owner's user_id
   const [storeId,    setStoreId]    = useState<string | null>(null)
   const [storeName,  setStoreName]  = useState('')
   const [flash,      setFlash]      = useState('')
@@ -93,10 +87,8 @@ export default function SettingsPage() {
   const [lightMode,  setLightMode]  = useState(false)
   const [largeFonts, setLargeFonts] = useState(false)
 
-  // Refs for Enter-key navigation between cells
   const valueCellRefs    = useRef<(HTMLDivElement | null)[]>([])
   const bookSizeCellRefs = useRef<(HTMLDivElement | null)[]>([])
-
   const redirected = useRef(false)
 
   useEffect(() => {
@@ -114,9 +106,18 @@ export default function SettingsPage() {
       const sid   = localStorage.getItem('selected_store_id')
       const sname = localStorage.getItem('selected_store_name')
       if (!sid) { window.location.href = '/stores'; return }
-      setUserId(session.user.id); setStoreId(sid); setStoreName(sname || 'Store')
+      setStoreId(sid)
+      setStoreName(sname || 'Store')
+
+      // Get store owner's user_id — ticket_values are stored under owner's user_id
+      const { data: storeData } = await supabase
+        .from('stores').select('user_id').eq('id', sid).single()
+      const ownerId = storeData?.user_id || session.user.id
+      setOwnerUserId(ownerId)
+
+      // Load tickets by store_id only (works for both owner and shared users)
       const { data } = await supabase.from('ticket_values').select('*')
-        .eq('user_id', session.user.id).eq('store_id', sid).order('ticket_number')
+        .eq('store_id', sid).order('ticket_number')
       setTickets(data || [])
       setLoading(false)
     })
@@ -140,9 +141,8 @@ export default function SettingsPage() {
     search === '' || String(t.ticket_number).includes(search) || String(t.value).includes(search)
   )
 
-  // Save a single field for a ticket
   async function saveField(ticket_number: number, field: 'value' | 'book_size', val: number) {
-    if (!userId || !storeId) return
+    if (!ownerUserId || !storeId) return
     const existing = tickets.find(t => t.ticket_number === ticket_number)
     if (!existing) return
     const updated = { ...existing, [field]: val }
@@ -150,7 +150,7 @@ export default function SettingsPage() {
       ticket_number,
       value:     updated.value,
       book_size: updated.book_size,
-      user_id:   userId,
+      user_id:   ownerUserId,  // always use owner's user_id
       store_id:  storeId,
     })
     setTickets(prev => prev.map(t => t.ticket_number === ticket_number ? updated : t))
@@ -161,16 +161,16 @@ export default function SettingsPage() {
     const last = parseInt(lastTicket)
     const val  = parseFloat(defaultVal)
     const size = parseInt(defaultSize) || 100
-    if (!last || last < 1 || isNaN(val) || val < 0 || !userId || !storeId) return
+    if (!last || last < 1 || isNaN(val) || val < 0 || !ownerUserId || !storeId) return
     setGenerating(true)
     const rows = Array.from({ length: last }, (_, i) => ({
       ticket_number: i + 1, value: val, book_size: size,
-      user_id: userId, store_id: storeId,
+      user_id: ownerUserId, store_id: storeId,
     }))
     for (let i = 0; i < rows.length; i += 50)
       await supabase.from('ticket_values').upsert(rows.slice(i, i + 50))
     const { data } = await supabase.from('ticket_values').select('*')
-      .eq('user_id', userId).eq('store_id', storeId).order('ticket_number')
+      .eq('store_id', storeId).order('ticket_number')
     setTickets(data || [])
     setShowSetup(false); setLastTicket(''); setDefaultVal(''); setDefaultSize('100')
     setGenerating(false)
@@ -181,11 +181,11 @@ export default function SettingsPage() {
     const num  = parseInt(newNum)
     const val  = parseFloat(newVal)
     const size = parseInt(newSize) || 100
-    if (!num || isNaN(num) || isNaN(val) || val < 0 || !userId || !storeId) return
+    if (!num || isNaN(num) || isNaN(val) || val < 0 || !ownerUserId || !storeId) return
     setAdding(true)
     await supabase.from('ticket_values').upsert({
       ticket_number: num, value: val, book_size: size,
-      user_id: userId, store_id: storeId,
+      user_id: ownerUserId, store_id: storeId,
     })
     setTickets(prev => {
       const rest = prev.filter(t => t.ticket_number !== num)
@@ -199,7 +199,8 @@ export default function SettingsPage() {
   async function deleteTicket(ticket_number: number) {
     if (!confirm(`Delete ticket #${ticket_number}?`)) return
     await supabase.from('ticket_values').delete()
-      .eq('ticket_number', ticket_number).eq('user_id', userId!).eq('store_id', storeId!)
+      .eq('ticket_number', ticket_number)
+      .eq('store_id', storeId!)
     setTickets(prev => prev.filter(t => t.ticket_number !== ticket_number))
     showFlash('Deleted')
   }
@@ -299,9 +300,7 @@ export default function SettingsPage() {
       {/* Add single ticket */}
       <div style={{ margin: '12px 18px 0', background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, padding: '18px' }}>
         <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4, color: 'var(--ink)' }}>Add / Update Ticket</div>
-        <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 14 }}>
-          Set $0 for finished books.
-        </div>
+        <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 14 }}>Set $0 for finished books.</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 8, alignItems: 'flex-end' }}>
           <div>
             <label className="field-label">Ticket #</label>
@@ -332,7 +331,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* Search */}
+      {/* Search + ticket list */}
       {tickets.length > 0 && (
         <div style={{ margin: '12px 18px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 10, padding: '10px 14px', marginBottom: 10 }}>
@@ -344,19 +343,12 @@ export default function SettingsPage() {
             <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-faint)', whiteSpace: 'nowrap' }}>{filtered.length}/{tickets.length}</span>
           </div>
 
-          {/* Ticket list — inline editable like session page */}
           <div style={{ background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, overflow: 'hidden' }}>
             {/* Column headers */}
             <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr 1fr 40px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line-dk)', padding: '0 12px' }}>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center' }}>
-                Ticket
-              </div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>
-                Value
-              </div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>
-                Tickets/Book
-              </div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center' }}>Ticket</div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>Value</div>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', height: 36, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>Tickets/Book</div>
               <div />
             </div>
 
@@ -364,7 +356,7 @@ export default function SettingsPage() {
               <div key={t.ticket_number}
                 style={{ display: 'grid', gridTemplateColumns: '100px 1fr 1fr 40px', alignItems: 'center', borderBottom: i < filtered.length - 1 ? '1px solid var(--line)' : 'none', minHeight: 48 }}>
 
-                {/* Ticket number — not editable, just label */}
+                {/* Ticket number */}
                 <div style={{ paddingLeft: 14, display: 'flex', alignItems: 'center', gap: 8, height: 48 }}>
                   <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: t.value === 0 ? 'var(--ink-faint)' : 'var(--ink)' }}>
                     #{t.ticket_number}
@@ -402,7 +394,6 @@ export default function SettingsPage() {
             ))}
           </div>
 
-          {/* Helper tip */}
           <div style={{ marginTop: 10, padding: '10px 14px', background: 'var(--navy-mid)', borderRadius: 10, fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', letterSpacing: '.04em' }}>
             💡 Tap any value to edit · Enter jumps to next cell · Tap ✎ to re-edit
           </div>

@@ -242,7 +242,7 @@ export default function HistoryPage() {
                 <div style={{ background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, overflow: 'hidden' }}>
                   {monthSessions.map((s, i) => {
                     const date         = new Date(s.session_date + 'T00:00:00')
-                    const isToday      = s.session_date === new Date().toISOString().split('T')[0]
+                    const isToday = s.session_date === new Date().toLocaleDateString('en-CA')
                     const rev          = s.total_revenue ?? 0
                     const sr50NetSales = s.sr50_net_sales ?? 0
                     const sr50Cashes   = s.sr50_cashes   ?? 0

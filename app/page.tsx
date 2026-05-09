@@ -23,7 +23,7 @@ export default function HomePage() {
   const [storeName,   setStoreName]   = useState('')
   const [storeId,     setStoreId]     = useState<string | null>(null)
   const redirected = useRef(false)
-  const today = new Date().toISOString().split('T')[0]
+  const today = new Date().toLocaleDateString('en-CA')
 
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {

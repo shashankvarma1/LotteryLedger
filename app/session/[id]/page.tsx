@@ -535,7 +535,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     const yesterday = new Date(session.session_date + 'T00:00:00')
     yesterday.setDate(yesterday.getDate() - 1)
-    const yDate = yesterday.toISOString().split('T')[0]
+    const yDate = yesterday.toLocaleDateString('en-CA')
     const sid   = localStorage.getItem('selected_store_id')
 
     const { data: prevSession } = await supabase
@@ -624,7 +624,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   if (!session) return <div className="empty" style={{ marginTop: 80 }}>NOT FOUND</div>
 
   const sessionDate = new Date(session.session_date + 'T00:00:00')
-  const isToday     = session.session_date === new Date().toISOString().split('T')[0]
+  const isToday = session.session_date === new Date().toLocaleDateString('en-CA')
 
   // ── Lock logic: admin can always edit, users can only edit today ──
   const isLocked = !isAdmin && !isToday

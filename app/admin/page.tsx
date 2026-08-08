@@ -19,6 +19,7 @@ export default function AdminPage() {
   const [invitePw,    setInvitePw]    = useState('')
   const [inviteRole,  setInviteRole]  = useState<'user' | 'admin'>('user')
   const [inviting,    setInviting]    = useState(false)
+  const [togglingRole, setTogglingRole] = useState<string | null>(null)
   const redirected = useRef(false)
 
   function showToast(msg: string, type: 'ok' | 'err' = 'ok') {
@@ -32,11 +33,9 @@ export default function AdminPage() {
         if (!redirected.current) { redirected.current = true; window.location.href = '/auth' }
         return
       }
-
       const { data: prof } = await supabase.from('profiles').select('*').eq('id', session.user.id).single()
       if (!prof || prof.role !== 'admin') { window.location.href = '/'; return }
       setProfile(prof)
-
       await reload()
       setLoading(false)
     })
@@ -79,10 +78,24 @@ export default function AdminPage() {
 
   async function toggleRole(userId: string, currentRole: string) {
     const newRole = currentRole === 'admin' ? 'user' : 'admin'
-    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId)
-    if (error) { showToast(error.message, 'err'); return }
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole as 'admin' | 'user' } : u))
-    showToast(`Role changed to ${newRole}`)
+    setTogglingRole(userId)
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ role: newRole })
+      .eq('id', userId)
+
+    if (error) {
+      showToast(`Failed to change role: ${error.message}`, 'err')
+      setTogglingRole(null)
+      return
+    }
+
+    setUsers(prev => prev.map(u =>
+      u.id === userId ? { ...u, role: newRole as 'admin' | 'user' } : u
+    ))
+    showToast(`✓ Role changed to ${newRole}`)
+    setTogglingRole(null)
   }
 
   async function inviteUser() {
@@ -91,17 +104,12 @@ export default function AdminPage() {
 
     setInviting(true)
 
-    // Sign up the new user
     const { data, error } = await supabase.auth.signUp({
       email:    inviteEmail.trim(),
       password: invitePw,
     })
 
-    if (error) {
-      showToast(error.message, 'err')
-      setInviting(false)
-      return
-    }
+    if (error) { showToast(error.message, 'err'); setInviting(false); return }
 
     if (!data.user) {
       showToast('User created but needs email confirmation. Disable email confirmation in Supabase Auth settings.', 'err')
@@ -109,26 +117,16 @@ export default function AdminPage() {
       return
     }
 
-    const newUserId = data.user.id
-
-    // Wait a moment for the profile trigger to fire
     await new Promise(r => setTimeout(r, 1000))
 
-    // Set role if admin
     if (inviteRole === 'admin') {
       const { error: roleErr } = await supabase.from('profiles')
-        .update({ role: 'admin' }).eq('id', newUserId)
-      if (roleErr) {
-        showToast(`User created but could not set admin role: ${roleErr.message}`, 'err')
-      }
+        .update({ role: 'admin' }).eq('id', data.user.id)
+      if (roleErr) showToast(`User created but could not set admin role: ${roleErr.message}`, 'err')
     }
 
-    // Reload all data to reflect new user
     await reload()
-
-    setInviteEmail('')
-    setInvitePw('')
-    setInviteRole('user')
+    setInviteEmail(''); setInvitePw(''); setInviteRole('user')
     showToast(`✓ User ${inviteEmail} created successfully`)
     setInviting(false)
   }
@@ -171,9 +169,7 @@ export default function AdminPage() {
             Toggle access for each user to each store. Store owners always have full access.
           </div>
 
-          {stores.length === 0 && (
-            <div className="empty">No stores created yet.</div>
-          )}
+          {stores.length === 0 && <div className="empty">No stores created yet.</div>}
 
           {stores.map(store => {
             const owner      = users.find(u => u.id === store.user_id)
@@ -181,7 +177,6 @@ export default function AdminPage() {
 
             return (
               <div key={store.id} style={{ marginBottom: 20, background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, overflow: 'hidden' }}>
-                {/* Store header */}
                 <div style={{ padding: '14px 18px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line-dk)' }}>
                   <div style={{ fontWeight: 600, fontSize: 15, color: 'var(--ink)', marginBottom: 2 }}>{store.name}</div>
                   {store.address && <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{store.address}</div>}
@@ -221,7 +216,6 @@ export default function AdminPage() {
                           <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)' }}>{user.email}</div>
                         )}
                       </div>
-                      {/* Toggle switch */}
                       <button
                         onClick={() => toggleAccess(user.id, store.id)}
                         style={{
@@ -267,22 +261,16 @@ export default function AdminPage() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div>
                 <label className="field-label">Email</label>
-                <input
-                  type="email" value={inviteEmail}
+                <input type="email" value={inviteEmail}
                   onChange={e => setInviteEmail(e.target.value)}
-                  placeholder="employee@example.com"
-                  className="field-input"
-                />
+                  placeholder="employee@example.com" className="field-input" />
               </div>
               <div>
                 <label className="field-label">Password</label>
-                <input
-                  type="text" value={invitePw}
+                <input type="text" value={invitePw}
                   onChange={e => setInvitePw(e.target.value)}
-                  placeholder="min 6 characters"
-                  className="field-input"
-                  onKeyDown={e => { if (e.key === 'Enter') inviteUser() }}
-                />
+                  placeholder="min 6 characters" className="field-input"
+                  onKeyDown={e => { if (e.key === 'Enter') inviteUser() }} />
               </div>
               <div>
                 <label className="field-label">Role</label>
@@ -301,13 +289,8 @@ export default function AdminPage() {
                   ))}
                 </div>
               </div>
-
-              <button
-                className="btn btn-gold"
-                onClick={inviteUser}
-                disabled={inviting}
-                style={{ width: '100%', padding: '13px', fontSize: 13, marginTop: 4 }}
-              >
+              <button className="btn btn-gold" onClick={inviteUser} disabled={inviting}
+                style={{ width: '100%', padding: '13px', fontSize: 13, marginTop: 4 }}>
                 {inviting ? 'Creating user...' : 'Create User'}
               </button>
             </div>
@@ -319,21 +302,16 @@ export default function AdminPage() {
               {users.length} Users
             </div>
 
-            {users.length === 0 && (
-              <div style={{ padding: '20px 18px', fontSize: 13, color: 'var(--ink-ghost)', textAlign: 'center' }}>
-                No users yet
-              </div>
-            )}
-
             {users.map((user, i) => {
               const userStores = stores.filter(s =>
                 s.user_id === user.id || hasAccess(user.id, s.id)
               )
               const isSelf = user.id === profile?.id
+              const isToggling = togglingRole === user.id
 
               return (
-                <div key={user.id} style={{ padding: '14px 18px', borderBottom: i < users.length - 1 ? '1px solid var(--line)' : 'none' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div key={user.id} style={{ padding: '16px 18px', borderBottom: i < users.length - 1 ? '1px solid var(--line)' : 'none' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                     <div>
                       <div style={{ fontWeight: 500, fontSize: 14, color: 'var(--ink)', display: 'flex', alignItems: 'center', gap: 6 }}>
                         {user.display_name || user.email}
@@ -346,20 +324,38 @@ export default function AdminPage() {
                       )}
                     </div>
 
-                    {/* Role toggle */}
-                    {!isSelf ? (
-                      <button onClick={() => toggleRole(user.id, user.role)}
-                        style={{
-                          padding: '5px 12px', border: '1px solid var(--line-dk)', borderRadius: 20,
-                          background: user.role === 'admin' ? 'var(--gold-dim)' : 'var(--card)',
-                          color: user.role === 'admin' ? 'var(--gold)' : 'var(--ink-faint)',
-                          fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
-                        }}>
-                        {user.role === 'admin' ? '★ Admin' : 'User'}
-                      </button>
-                    ) : (
-                      <div style={{ padding: '5px 12px', borderRadius: 20, background: 'var(--gold-dim)', color: 'var(--gold)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600 }}>
+                    {/* Role toggle — show for everyone including self (view only for self) */}
+                    {isSelf ? (
+                      <div style={{ padding: '6px 14px', borderRadius: 20, background: 'var(--gold-dim)', color: 'var(--gold)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600 }}>
                         ★ Admin
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                        <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.06em', textTransform: 'uppercase' }}>
+                          Role
+                        </div>
+                        <button
+                          onClick={() => toggleRole(user.id, user.role)}
+                          disabled={isToggling}
+                          style={{
+                            padding: '6px 14px',
+                            border: '1.5px solid',
+                            borderColor: user.role === 'admin' ? 'var(--gold)' : 'var(--line-dk)',
+                            borderRadius: 20,
+                            background: user.role === 'admin' ? 'var(--gold-dim)' : 'var(--card)',
+                            color: user.role === 'admin' ? 'var(--gold)' : 'var(--ink-faint)',
+                            fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
+                            cursor: isToggling ? 'wait' : 'pointer',
+                            opacity: isToggling ? 0.6 : 1,
+                            transition: 'all .15s',
+                            display: 'flex', alignItems: 'center', gap: 5,
+                          }}
+                        >
+                          {isToggling ? '...' : user.role === 'admin' ? '★ Admin' : '👤 User'}
+                        </button>
+                        <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-ghost)' }}>
+                          tap to {user.role === 'admin' ? 'demote' : 'promote'}
+                        </div>
                       </div>
                     )}
                   </div>

@@ -441,34 +441,55 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     ])
 
     if (sess) {
-      // Save ticket snapshot if not already saved
-      if (tvs && !sess.ticket_snapshot) {
-        const snapshot = tvs.map((t: TicketValue) => ({
-          ticket_number: t.ticket_number,
-          value:         t.value,
-          book_size:     t.book_size,
-        }))
-        const { data: updated } = await supabase
-          .from('sessions')
-          .update({ ticket_snapshot: snapshot })
-          .eq('id', sess.id)
-          .select().single()
-        if (updated) setSession(updated)
-        else setSession(sess)
-      } else {
-        setSession(sess)
-      }
+      const sessionIsToday = sess.session_date === new Date().toLocaleDateString('en-CA')
 
-      // Use snapshot for display if available
-      if (sess.ticket_snapshot) {
-        const snapshot = sess.ticket_snapshot as TicketValue[]
-        if (snapshot && snapshot.length > 0) {
-          setTickets(snapshot)
+      if (sessionIsToday) {
+        // ── Today: always use live ticket_values so settings changes reflect immediately ──
+        // Update snapshot silently in background so PDF uses today's latest prices
+        if (tvs) {
+          const snapshot = tvs.map((t: TicketValue) => ({
+            ticket_number: t.ticket_number,
+            value:         t.value,
+            book_size:     t.book_size,
+          }))
+          supabase.from('sessions')
+            .update({ ticket_snapshot: snapshot })
+            .eq('id', sess.id)
+            .then(() => {})  // fire and forget
+          setTickets(tvs)
+        }
+        setSession(sess)
+      } else {
+        // ── Past sessions: use snapshot to preserve old prices ──
+        if (tvs && !sess.ticket_snapshot) {
+          // Save snapshot if not already saved
+          const snapshot = tvs.map((t: TicketValue) => ({
+            ticket_number: t.ticket_number,
+            value:         t.value,
+            book_size:     t.book_size,
+          }))
+          const { data: updated } = await supabase
+            .from('sessions')
+            .update({ ticket_snapshot: snapshot })
+            .eq('id', sess.id)
+            .select().single()
+          if (updated) setSession(updated)
+          else setSession(sess)
+        } else {
+          setSession(sess)
+        }
+
+        // Use snapshot for display on past sessions
+        if (sess.ticket_snapshot) {
+          const snapshot = sess.ticket_snapshot as TicketValue[]
+          if (snapshot && snapshot.length > 0) {
+            setTickets(snapshot)
+          } else if (tvs) {
+            setTickets(tvs)
+          }
         } else if (tvs) {
           setTickets(tvs)
         }
-      } else if (tvs) {
-        setTickets(tvs)
       }
     }
 
@@ -596,7 +617,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     const html = generateHtml(session, bookMap, tickets)
 
-    // Save HTML to database so History can show it
     const { data } = await supabase
       .from('sessions')
       .update({
@@ -610,7 +630,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     setSavingPdf(false)
     showToast('✓ PDF saved to History')
 
-    // Open print dialog
     const w = window.open('', '_blank')
     if (!w) return
     w.document.write(html); w.document.close(); w.focus()

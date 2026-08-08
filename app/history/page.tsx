@@ -59,6 +59,7 @@ export default function HistoryPage() {
 
       if (!sessionList) { setLoading(false); return }
 
+      // Load live ticket values as fallback for sessions without snapshot
       const { data: tvs } = await supabase
         .from('ticket_values').select('*')
         .eq('store_id', sid).order('ticket_number')
@@ -70,15 +71,19 @@ export default function HistoryPage() {
 
         const active = (books || []).filter((b: { is_returned: boolean }) => !b.is_returned)
 
+        // ── Use ticket_snapshot if available so history matches session page exactly ──
+        const snapshot = s.ticket_snapshot as { ticket_number: number; value: number; book_size: number }[] | null
+        const ticketsForCalc = (snapshot && snapshot.length > 0) ? snapshot : (tvs || [])
+
         const totalSold = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-          const ticket   = (tvs || [])[b.row_number - 1]
+          const ticket   = ticketsForCalc[b.row_number - 1]
           const bookSize = ticket?.book_size ?? null
           const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
           return sum + sold
         }, 0)
 
         const totalRevenue = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-          const ticket   = (tvs || [])[b.row_number - 1]
+          const ticket   = ticketsForCalc[b.row_number - 1]
           const price    = ticket?.value    ?? 0
           const bookSize = ticket?.book_size ?? null
           const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
@@ -110,6 +115,16 @@ export default function HistoryPage() {
     localStorage.removeItem('selected_store_id')
     localStorage.removeItem('selected_store_name')
     window.location.href = '/auth'
+  }
+
+  function openPdf(pdfHtml: string) {
+    const w = window.open('', '_blank')
+    if (w) {
+      w.document.write(pdfHtml)
+      w.document.close()
+      w.focus()
+      setTimeout(() => w.print(), 320)
+    }
   }
 
   function exportCSV() {
@@ -242,49 +257,71 @@ export default function HistoryPage() {
                 <div style={{ background: 'var(--card)', border: '1px solid var(--line-dk)', borderRadius: 14, overflow: 'hidden' }}>
                   {monthSessions.map((s, i) => {
                     const date         = new Date(s.session_date + 'T00:00:00')
-                    const isToday = s.session_date === new Date().toLocaleDateString('en-CA')
+                    const isToday      = s.session_date === new Date().toLocaleDateString('en-CA')
                     const rev          = s.total_revenue ?? 0
                     const sr50NetSales = s.sr50_net_sales ?? 0
                     const sr50Cashes   = s.sr50_cashes   ?? 0
                     const ir34Cashes   = s.ir34_totals   ?? 0
                     const hasSR50      = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0
                     const finalTotal   = parseFloat((rev + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+                    const pdfHtml      = s.pdf_html
 
                     return (
-                      <a key={s.id} href={`/session/${s.id}`} className="hist-row"
-                        style={{ borderBottom: i < monthSessions.length - 1 ? '1px solid var(--line)' : 'none' }}>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontWeight: isToday ? 700 : 500, fontSize: 14, marginBottom: 3, color: isToday ? 'var(--gold)' : 'var(--ink)' }}>
-                            {isToday ? '⭐ TODAY' : date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-                          </div>
-                          <div style={{ fontSize: 12, color: 'var(--ink-faint)', fontFamily: 'var(--mono)' }}>
-                            {s.book_count} books · {s.total_sold} sold
-                            {rev > 0 ? ` · $${rev.toFixed(2)}` : ''}
-                            {s.notes ? ` · ${s.notes}` : ''}
-                          </div>
-                        </div>
+                      <div key={s.id} style={{ borderBottom: i < monthSessions.length - 1 ? '1px solid var(--line)' : 'none' }}>
 
-                        <div style={{ textAlign: 'right', marginRight: 4, minWidth: 80 }}>
-                          {hasSR50 ? (
-                            <>
-                              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Final</div>
-                              <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)' }}>${finalTotal.toFixed(2)}</div>
-                            </>
-                          ) : rev > 0 ? (
-                            <>
-                              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Tickets</div>
-                              <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--ink-mid)' }}>${rev.toFixed(2)}</div>
-                            </>
+                        {/* Main session row */}
+                        <a href={`/session/${s.id}`} className="hist-row" style={{ borderBottom: 'none' }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: isToday ? 700 : 500, fontSize: 14, marginBottom: 3, color: isToday ? 'var(--gold)' : 'var(--ink)' }}>
+                              {isToday ? '⭐ TODAY' : date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--ink-faint)', fontFamily: 'var(--mono)' }}>
+                              {s.book_count} books · {s.total_sold} sold
+                              {rev > 0 ? ` · $${rev.toFixed(2)}` : ''}
+                              {s.notes ? ` · ${s.notes}` : ''}
+                            </div>
+                          </div>
+
+                          <div style={{ textAlign: 'right', marginRight: 4, minWidth: 80 }}>
+                            {hasSR50 ? (
+                              <>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Final</div>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)' }}>${finalTotal.toFixed(2)}</div>
+                              </>
+                            ) : rev > 0 ? (
+                              <>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Tickets</div>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--ink-mid)' }}>${rev.toFixed(2)}</div>
+                              </>
+                            ) : (
+                              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink-ghost)' }}>no data</div>
+                            )}
+                          </div>
+                        </a>
+
+                        {/* PDF button + delete row */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px 8px', gap: 8 }}>
+                          {pdfHtml ? (
+                            <button
+                              onClick={() => openPdf(pdfHtml)}
+                              style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: '1px solid var(--line-dk)', cursor: 'pointer', color: 'var(--sky)', fontSize: 11, padding: '5px 10px', borderRadius: 6, fontFamily: 'var(--mono)', fontWeight: 600 }}
+                            >
+                              ⎙ Open PDF
+                            </button>
                           ) : (
-                            <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink-ghost)' }}>no data</div>
+                            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-ghost)', fontStyle: 'italic', padding: '5px 0' }}>
+                              No PDF saved
+                            </div>
                           )}
-                        </div>
 
-                        <button onClick={e => { e.preventDefault(); e.stopPropagation(); setDeleteId(s.id) }}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ink-ghost)', fontSize: 18, padding: '4px 2px' }}>
-                          ×
-                        </button>
-                      </a>
+                          <button
+                            onClick={() => setDeleteId(s.id)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ink-ghost)', fontSize: 18, padding: '4px 6px' }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
                     )
                   })}
                 </div>

@@ -34,6 +34,9 @@ export type Session = {
   store_id: string
   created_at: string
   ticket_revenue: number
+  ticket_snapshot: unknown
+  pdf_html: string | null
+  pdf_saved_at: string | null
 }
 
 export type Book = {

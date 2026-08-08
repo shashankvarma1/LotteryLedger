@@ -18,34 +18,29 @@ function calcTotal(sold: number, price: number) {
   return parseFloat((sold * price).toFixed(2))
 }
 
-// ─── PDF ─────────────────────────────────────────────────────────────────────
+// ─── Generate HTML ────────────────────────────────────────────────────────────
 
-function printSession(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[]) {
+function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[]): string {
   const dateStr   = new Date(session.session_date + 'T00:00:00').toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
-  const storeName = localStorage.getItem('selected_store_name') || ''
+  const storeName     = localStorage.getItem('selected_store_name') || ''
+  const snapshot      = session.ticket_snapshot as TicketValue[] | null
+  const ticketsForPdf = (snapshot && snapshot.length > 0) ? snapshot : tickets
+
   let grandSold = 0
   let grandAmt  = 0
 
-  const rows = tickets.map((ticket, i) => {
+  const rows = ticketsForPdf.map((ticket, i) => {
     const book     = bookMap[i + 1]
     const price    = ticket.value
     const bookSize = ticket.book_size || 100
 
     if (!book || book.is_returned) {
-      return `<tr style="opacity:.4">
-        <td>${i+1}</td><td>#${ticket.ticket_number}</td>
-        <td class="r">$${price}</td>
-        <td class="r">—</td><td class="r">—</td><td class="r">—</td><td class="r">—</td>
-      </tr>`
+      return `<tr style="opacity:.4"><td>${i+1}</td><td>#${ticket.ticket_number}</td><td class="r">$${price}</td><td class="r">—</td><td class="r">—</td><td class="r">—</td><td class="r">—</td></tr>`
     }
     if (book.start_num === null || book.end_num === null) {
-      return `<tr>
-        <td>${i+1}</td><td>#${ticket.ticket_number}</td>
-        <td class="r">$${price}</td>
-        <td colspan="4" style="text-align:center;color:#94a3b8;font-style:italic">not entered</td>
-      </tr>`
+      return `<tr><td>${i+1}</td><td>#${ticket.ticket_number}</td><td class="r">$${price}</td><td colspan="4" style="text-align:center;color:#94a3b8;font-style:italic">not entered</td></tr>`
     }
 
     const s = calcSold(book.start_num, book.end_num, bookSize)
@@ -54,8 +49,7 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
     grandAmt   = parseFloat((grandAmt + t).toFixed(2))
 
     return `<tr>
-      <td>${i+1}</td>
-      <td>#${ticket.ticket_number}</td>
+      <td>${i+1}</td><td>#${ticket.ticket_number}</td>
       <td class="r" style="color:#d97706;font-weight:600">$${price % 1 === 0 ? price : price.toFixed(2)}</td>
       <td class="r">${book.start_num}</td>
       <td class="r">${book.end_num}</td>
@@ -70,9 +64,8 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
   const totalCashes   = parseFloat((sr50Cashes + ir34Cashes).toFixed(2))
   const combinedSales = parseFloat((grandAmt + sr50NetSales).toFixed(2))
   const finalTotal    = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
-  const fileName      = `lottery-ledger-${storeName ? storeName.replace(/\s+/g, '-').toLowerCase() + '-' : ''}${session.session_date}.html`
 
-  const enteredCount = tickets.filter((_, i) => {
+  const enteredCount = ticketsForPdf.filter((_, i) => {
     const b = bookMap[i + 1]
     return b && !b.is_returned && b.start_num !== null && b.end_num !== null
   }).length
@@ -82,7 +75,7 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
   const finBox3 = `<div class="fin-box combined"><div class="fin-lbl gold">Ticket Rev + Net Sales</div><div class="fin-val gold">$${combinedSales.toFixed(2)}</div><div class="fin-sub">$${grandAmt.toFixed(2)} + $${sr50NetSales.toFixed(2)}</div></div>`
   const finBox4 = `<div class="fin-box cashes"><div class="fin-lbl red">Total Cashes</div><div class="fin-val red">$${totalCashes.toFixed(2)}</div><div class="fin-sub">SR50: $${sr50Cashes.toFixed(2)} + IR34: $${ir34Cashes.toFixed(2)}</div></div>`
 
-  const html = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -158,7 +151,7 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
     </div>
   </div>
   <div class="stats-strip">
-    <div class="stat-box"><div class="stat-lbl">Tickets Entered</div><div class="stat-val">${enteredCount}/${tickets.length}</div></div>
+    <div class="stat-box"><div class="stat-lbl">Tickets Entered</div><div class="stat-val">${enteredCount}/${ticketsForPdf.length}</div></div>
     <div class="stat-box"><div class="stat-lbl">Total Sold</div><div class="stat-val gold">${grandSold}</div></div>
     <div class="stat-box"><div class="stat-lbl">Ticket Revenue</div><div class="stat-val green">$${grandAmt.toFixed(2)}</div></div>
   </div>
@@ -206,17 +199,6 @@ function printSession(session: Session, bookMap: Record<number, Book>, tickets: 
   </div>
 </body>
 </html>`
-
-  const blob = new Blob([html], { type: 'text/html' })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement('a')
-  a.href = url; a.download = fileName; a.click()
-  URL.revokeObjectURL(url)
-
-  const w = window.open('', '_blank')
-  if (!w) return
-  w.document.write(html); w.document.close(); w.focus()
-  setTimeout(() => w.print(), 500)
 }
 
 // ─── Report Panel ─────────────────────────────────────────────────────────────
@@ -335,8 +317,7 @@ function NumInput({ value, placeholder, onSave, onEnter, disabled }: {
   return (
     <div onClick={startEdit} style={{
       height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-      padding: '0 10px',
-      cursor: disabled ? 'default' : 'text',
+      padding: '0 10px', cursor: disabled ? 'default' : 'text',
       fontFamily: 'var(--mono)', fontSize: 15,
       color: value !== null ? 'var(--ink)' : 'var(--ink-ghost)',
       fontWeight: value !== null ? 600 : 400,
@@ -413,6 +394,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [showReport, setShowReport] = useState(false)
   const [isOnline,   setIsOnline]   = useState(true)
   const [isAdmin,    setIsAdmin]    = useState(false)
+  const [savingPdf,  setSavingPdf]  = useState(false)
   const redirected    = useRef(false)
   const startCellRefs = useRef<(HTMLDivElement | null)[]>([])
   const endCellRefs   = useRef<(HTMLDivElement | null)[]>([])
@@ -448,7 +430,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const sid = localStorage.getItem('selected_store_id')
     if (!sid) { window.location.href = '/stores'; return }
 
-    // Check if user is admin
     const { data: profile } = await supabase
       .from('profiles').select('role').eq('id', auth.user.id).single()
     setIsAdmin(profile?.role === 'admin')
@@ -459,8 +440,38 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       supabase.from('ticket_values').select('*').eq('store_id', sid).order('ticket_number'),
     ])
 
-    if (sess) setSession(sess)
-    if (tvs)  setTickets(tvs)
+    if (sess) {
+      // Save ticket snapshot if not already saved
+      if (tvs && !sess.ticket_snapshot) {
+        const snapshot = tvs.map((t: TicketValue) => ({
+          ticket_number: t.ticket_number,
+          value:         t.value,
+          book_size:     t.book_size,
+        }))
+        const { data: updated } = await supabase
+          .from('sessions')
+          .update({ ticket_snapshot: snapshot })
+          .eq('id', sess.id)
+          .select().single()
+        if (updated) setSession(updated)
+        else setSession(sess)
+      } else {
+        setSession(sess)
+      }
+
+      // Use snapshot for display if available
+      if (sess.ticket_snapshot) {
+        const snapshot = sess.ticket_snapshot as TicketValue[]
+        if (snapshot && snapshot.length > 0) {
+          setTickets(snapshot)
+        } else if (tvs) {
+          setTickets(tvs)
+        }
+      } else if (tvs) {
+        setTickets(tvs)
+      }
+    }
+
     if (bks) {
       const map: Record<number, Book> = {}
       bks.forEach(b => { map[b.row_number] = b })
@@ -579,6 +590,33 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     showToast(copied > 0 ? `✓ Copied ${copied} start numbers from yesterday` : 'Nothing to copy')
   }
 
+  async function handlePrint() {
+    if (!session) return
+    setSavingPdf(true)
+
+    const html = generateHtml(session, bookMap, tickets)
+
+    // Save HTML to database so History can show it
+    const { data } = await supabase
+      .from('sessions')
+      .update({
+        pdf_html:     html,
+        pdf_saved_at: new Date().toISOString(),
+      })
+      .eq('id', session.id)
+      .select().single()
+
+    if (data) setSession(data)
+    setSavingPdf(false)
+    showToast('✓ PDF saved to History')
+
+    // Open print dialog
+    const w = window.open('', '_blank')
+    if (!w) return
+    w.document.write(html); w.document.close(); w.focus()
+    setTimeout(() => w.print(), 500)
+  }
+
   // ── Totals ──
   const grandSold = tickets.reduce((sum, ticket, idx) => {
     const b        = bookMap[idx + 1]
@@ -624,10 +662,8 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   if (!session) return <div className="empty" style={{ marginTop: 80 }}>NOT FOUND</div>
 
   const sessionDate = new Date(session.session_date + 'T00:00:00')
-  const isToday = session.session_date === new Date().toLocaleDateString('en-CA')
-
-  // ── Lock logic: admin can always edit, users can only edit today ──
-  const isLocked = !isAdmin && !isToday
+  const isToday     = session.session_date === new Date().toLocaleDateString('en-CA')
+  const isLocked    = !isAdmin && !isToday
 
   return (
     <div style={{ maxWidth: 620, margin: '0 auto', paddingBottom: 80 }}>
@@ -649,9 +685,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
             <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--emerald)' }}>✓ saved</span>
           )}
           {isLocked && (
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--gold)', display: 'flex', alignItems: 'center', gap: 4 }}>
-              🔒 locked
-            </span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--gold)' }}>🔒 locked</span>
           )}
           {isAdmin && !isToday && (
             <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--sky)' }}>admin</span>
@@ -660,7 +694,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       </header>
 
-      {/* Locked banner for regular users */}
       {isLocked && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 18px', background: 'rgba(240,165,0,0.06)', borderBottom: '1px solid var(--line-dk)', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--gold)', letterSpacing: '.04em' }}>
           🔒 This session is from a previous day — view only. Only admins can edit past sessions.
@@ -682,7 +715,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* Notes + Copy from yesterday */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line)' }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Note</span>
         <NotesInput session={session} onSave={s => setSession(s)} disabled={isLocked} />
@@ -729,7 +761,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                 return (
                   <tr key={ticket.ticket_number} className={isReturned ? 'ret' : ''}
                     style={{ background: !isReturned && !hasData && !isFinished && !isLocked ? 'rgba(240,165,0,0.03)' : undefined }}>
-
                     <td>
                       <div style={{ height: 46, display: 'flex', alignItems: 'center', paddingLeft: 12, gap: 8 }}>
                         <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: isFinished || isReturned ? 'var(--ink-faint)' : 'var(--ink)' }}>
@@ -741,7 +772,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                         )}
                       </div>
                     </td>
-
                     <td>
                       <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10 }}>
                         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 600, color: isFinished ? 'var(--ink-faint)' : 'var(--gold)' }}>
@@ -749,7 +779,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                         </span>
                       </div>
                     </td>
-
                     <td style={{ minWidth: 68 }} ref={el => { startCellRefs.current[idx] = el }}>
                       {isReturned
                         ? <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 10px', color: 'var(--ink-ghost)' }}>—</div>
@@ -760,7 +789,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                           />
                       }
                     </td>
-
                     <td style={{ minWidth: 68 }} ref={el => { endCellRefs.current[idx] = el }}>
                       {isReturned
                         ? <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '0 10px', color: 'var(--ink-ghost)' }}>—</div>
@@ -771,19 +799,16 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                           />
                       }
                     </td>
-
                     <td>
                       <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10, fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, color: s === 0 ? 'var(--ink-faint)' : 'var(--ink)' }}>
                         {isReturned ? '—' : (s !== null ? s : '')}
                       </div>
                     </td>
-
                     <td>
                       <div style={{ height: 46, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10, fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: t !== null && t > 0 ? 'var(--emerald)' : 'var(--ink-faint)' }}>
                         {isReturned ? '—' : (t !== null ? '$' + t.toFixed(2) : '')}
                       </div>
                     </td>
-
                     {!isLocked && (
                       <td>
                         <button className="xbtn" onClick={() => toggleReturn(idx)}
@@ -808,7 +833,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* SR50 / IR34 — editable only when not locked */}
       {!isLocked && (
         <div style={{ marginTop: 8, borderTop: '1px solid var(--line)' }}>
           <button className={`btn ${showReport ? 'btn-gold' : 'btn-ghost'}`}
@@ -821,7 +845,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
       {!isLocked && showReport && <ReportPanel session={session} onSave={s => setSession(s)} />}
 
-      {/* Final total — editable when not locked */}
       {!isLocked && hasFinalData && !showReport && (
         <div onClick={() => setShowReport(true)} style={{ cursor: 'pointer' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
@@ -848,7 +871,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* Final total — read only when locked */}
       {isLocked && hasFinalData && (
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
@@ -882,12 +904,15 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {/* PDF button — always visible */}
       {enteredCount > 0 && (
         <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, padding: '12px 18px', background: 'var(--navy-glass)', backdropFilter: 'blur(12px)', borderTop: '1px solid var(--line-dk)', display: 'flex', gap: 10, zIndex: 50, maxWidth: 620, margin: '0 auto' }}>
-          <button className="btn btn-gold" onClick={() => printSession(session, bookMap, tickets)}
-            style={{ flex: 1, padding: '14px', fontSize: 14, fontWeight: 700, borderRadius: 12 }}>
-            ⎙ {isLocked ? 'Print PDF' : 'Save & Print PDF'}
+          <button
+            className="btn btn-gold"
+            onClick={handlePrint}
+            disabled={savingPdf}
+            style={{ flex: 1, padding: '14px', fontSize: 14, fontWeight: 700, borderRadius: 12 }}
+          >
+            {savingPdf ? 'Saving...' : `⎙ ${isLocked ? 'Print PDF' : 'Save & Print PDF'}`}
           </button>
         </div>
       )}

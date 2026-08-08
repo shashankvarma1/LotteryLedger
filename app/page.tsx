@@ -3,14 +3,15 @@ import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import type { Session } from '@/lib/supabase'
 
-type SessionWithRevenue = Session & { computed_revenue: number }
+type SessionWithRevenue = Session & {
+  computed_revenue: number
+  computed_final:   number
+}
 
 function calcSoldSafe(start: number, end: number, bookSize: number | null): number {
   if (start === end) return 0
   if (end > start) return end - start
-  // Only wrap-around if book_size is explicitly set and not the default 100
   if (bookSize && bookSize > 0) return (bookSize - start) + end
-  // No book_size set — return 0 to avoid wrong calculations on old data
   return 0
 }
 
@@ -54,7 +55,7 @@ export default function HomePage() {
         }
       }
 
-      // Load ticket values by store_id only
+      // Load live ticket values as fallback for sessions without snapshot
       const { data: tvs } = await supabase
         .from('ticket_values').select('*')
         .eq('store_id', sid).order('ticket_number')
@@ -62,8 +63,6 @@ export default function HomePage() {
       const recent = list.slice(0, 5)
 
       const enriched = await Promise.all(recent.map(async (s) => {
-        // Always recompute from books — don't trust cached ticket_revenue
-        // until book_size is properly configured for all tickets
         const { data: books } = await supabase
           .from('books').select('*')
           .eq('session_id', s.id)
@@ -72,26 +71,32 @@ export default function HomePage() {
           (b: { is_returned: boolean }) => !b.is_returned
         )
 
-        const revenue = active.reduce(
+        // ── Use ticket_snapshot if available — same as session page and history ──
+        const snapshot = s.ticket_snapshot as { ticket_number: number; value: number; book_size: number }[] | null
+        const ticketsForCalc = (snapshot && snapshot.length > 0) ? snapshot : (tvs || [])
+
+        const ticketRevenue = active.reduce(
           (sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-            const ticket = (tvs || [])[b.row_number - 1]
-            const price  = ticket?.value ?? 0
-            // Only use wrap-around if book_size is explicitly set and not default 100
-            const bookSize = (ticket?.book_size && ticket.book_size !== 100)
-              ? ticket.book_size
-              : null
-            const start = b.start_num ?? 0
-            const end   = b.end_num   ?? 0
-            const sold  = calcSoldSafe(start, end, bookSize)
+            const ticket   = ticketsForCalc[b.row_number - 1]
+            const price    = ticket?.value    ?? 0
+            const bookSize = ticket?.book_size ?? null
+            const start    = b.start_num ?? 0
+            const end      = b.end_num   ?? 0
+            const sold     = calcSoldSafe(start, end, bookSize)
             return parseFloat((sum + sold * price).toFixed(2))
           },
           0
         )
 
-        return { ...s, computed_revenue: revenue }
+        const sr50Net    = s.sr50_net_sales ?? 0
+        const sr50Cashes = s.sr50_cashes   ?? 0
+        const ir34Cashes = s.ir34_totals   ?? 0
+        const finalTotal = parseFloat((ticketRevenue + sr50Net - sr50Cashes - ir34Cashes).toFixed(2))
+
+        return { ...s, computed_revenue: ticketRevenue, computed_final: finalTotal }
       }))
 
-      const rest = list.slice(5).map(s => ({ ...s, computed_revenue: 0 }))
+      const rest = list.slice(5).map(s => ({ ...s, computed_revenue: 0, computed_final: 0 }))
       setSessions([...enriched, ...rest])
       setLoading(false)
     })
@@ -217,7 +222,7 @@ export default function HomePage() {
                 const sr50Cashes = s.sr50_cashes     ?? 0
                 const ir34Cashes = s.ir34_totals     ?? 0
                 const hasSR50    = sr50Net > 0 || sr50Cashes > 0 || ir34Cashes > 0
-                const finalTotal = parseFloat((ticketRev + sr50Net - sr50Cashes - ir34Cashes).toFixed(2))
+                const finalTotal = s.computed_final
                 const hasData    = ticketRev > 0 || hasSR50
 
                 return (

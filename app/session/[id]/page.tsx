@@ -52,6 +52,16 @@ type StartChange = {
   newPrice:      number
 }
 
+function shortDate(d: string) {
+  return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+}
+
+function dayBefore(d: string) {
+  const x = new Date(d + 'T00:00:00')
+  x.setDate(x.getDate() - 1)
+  return x.toLocaleDateString('en-CA')
+}
+
 // Most recent session before this one (handles days the store was closed).
 // Books are matched by ticket number so the result doesn't depend on row order.
 async function fetchPrevDay(storeId: string, beforeDate: string, todayTickets: TicketValue[]):
@@ -702,6 +712,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [isAdmin,    setIsAdmin]    = useState(false)
   const [savingPdf,  setSavingPdf]  = useState(false)
   const [prevDay,    setPrevDay]    = useState<PrevDay | null>(null)
+  const [askPrev,    setAskPrev]    = useState<PrevDay | null>(null)  // "fetch the last saved session?" prompt
   const redirected    = useRef(false)
 
   // Past sessions are view-only for staff; only admins can change them.
@@ -941,7 +952,18 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     if (prevErr) { showToast(SAVE_FAILED); return }
     setPrevDay(prev)
     if (!prev) { showToast('No previous session found'); return }
-    if (prev.byTicket.size === 0) { showToast('No data in the previous session'); return }
+    if (prev.byTicket.size === 0) { showToast(`No ticket numbers saved in the ${shortDate(prev.date)} session`); return }
+
+    // No session yesterday → ask before copying from an older one.
+    if (prev.date !== dayBefore(session.session_date)) { setAskPrev(prev); return }
+
+    await copyStarts(prev)
+  }
+
+  async function copyStarts(prev: PrevDay) {
+    setAskPrev(null)
+    const { data: { session: auth } } = await supabase.auth.getSession()
+    if (!auth || !session || isLocked) return
 
     let copied = 0, failed = 0
     for (let idx = 0; idx < tickets.length; idx++) {
@@ -969,10 +991,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     if (navigator.vibrate) navigator.vibrate([40, 30, 40])
     if (failed > 0) showToast(`⚠ Copied ${copied}, ${failed} failed — check connection and try again`)
-    else {
-      const from = new Date(prev.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      showToast(copied > 0 ? `✓ Copied ${copied} start numbers from ${from}` : 'Nothing to copy')
-    }
+    else showToast(copied > 0 ? `✓ Copied ${copied} start numbers from ${shortDate(prev.date)}` : 'Nothing to copy — start numbers already filled')
   }
 
   async function handlePrint() {
@@ -1110,6 +1129,26 @@ export default function SessionPage({ params }: { params: { id: string } }) {
           </button>
         )}
       </div>
+
+      {askPrev && !isLocked && (
+        <div style={{ padding: '14px 18px', background: 'rgba(56,189,248,0.08)', borderBottom: '2px solid var(--sky)' }}>
+          <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink)', marginBottom: 4 }}>
+            No session found for yesterday ({shortDate(dayBefore(session.session_date))})
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--ink-faint)', marginBottom: 12, lineHeight: 1.5 }}>
+            Want to fetch the last saved session — <b style={{ color: 'var(--ink)' }}>{shortDate(askPrev.date)}</b>?
+            Its end numbers will be used as today&apos;s start numbers. Rows that already have a start number are not changed.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-gold" style={{ flex: 1, padding: '11px' }} onClick={() => copyStarts(askPrev)}>
+              Yes, use {shortDate(askPrev.date)}
+            </button>
+            <button className="btn btn-ghost" style={{ flex: 1, padding: '11px' }} onClick={() => setAskPrev(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {tickets.length === 0 && (
         <div style={{ margin: 18, padding: '14px 18px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 13, color: 'var(--rose)' }}>

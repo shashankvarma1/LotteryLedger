@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, SESSION_COLS } from '@/lib/supabase'
 import type { Session, Book, Correction, TicketValue } from '@/lib/supabase'
 import { n, calcSold, calcTotal, money, bookTotals, totalBeforeCb as calcBeforeCb, finalTotal as calcFinal, hasCloseOutData } from '@/lib/ledger'
 
@@ -369,7 +369,7 @@ function ReportPanel({ session, onSave, onError }: {
       update[k] = v
     }
     setSaving(true)
-    const { data, error } = await tracked(supabase.from('sessions').update(update).eq('id', session.id).select().single())
+    const { data, error } = await tracked(supabase.from('sessions').update(update).eq('id', session.id).select(SESSION_COLS).single())
     setSaving(false)
     if (error || !data) { onError('⚠ Save failed — check connection and try again'); return }
     onSave(data)
@@ -463,7 +463,7 @@ function CloseOutPanel({ session, totalBeforeCb, disabled, onSave, notify }: {
   const showDiff = hasDiff || diffOpen
 
   async function update(fields: Partial<Session>) {
-    const { data, error } = await tracked(supabase.from('sessions').update(fields).eq('id', session.id).select().single())
+    const { data, error } = await tracked(supabase.from('sessions').update(fields).eq('id', session.id).select(SESSION_COLS).single())
     if (error || !data) { onError(SAVE_FAILED); return false }
     onSave(data)
     return true
@@ -663,7 +663,7 @@ function NotesInput({ session, onSave, onError, disabled }: {
     if (draft === (session.notes || '')) return
     setSaving(true)
     const { data, error } = await tracked(supabase.from('sessions')
-      .update({ notes: draft || null }).eq('id', session.id).select().single())
+      .update({ notes: draft || null }).eq('id', session.id).select(SESSION_COLS).single())
     setSaving(false)
     if (error || !data) {
       // Keep the typed text in draft so tapping the note again lets them retry.
@@ -756,15 +756,20 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const sid = localStorage.getItem('selected_store_id')
     if (!sid) { window.location.href = '/stores'; return }
 
-    const { data: profile } = await supabase
-      .from('profiles').select('role').eq('id', auth.user.id).single()
-    setIsAdmin(profile?.role === 'admin')
-
-    const [{ data: sess }, { data: bks }, { data: tvs }] = await Promise.all([
-      supabase.from('sessions').select('*').eq('id', params.id).single(),
+    const [{ data: profile }, { data: sess }, { data: bks }, { data: tvs }] = await Promise.all([
+      supabase.from('profiles').select('role').eq('id', auth.user.id).single(),
+      supabase.from('sessions').select(SESSION_COLS).eq('id', params.id).single(),
       supabase.from('books').select('*').eq('session_id', params.id).order('row_number'),
       supabase.from('ticket_values').select('*').eq('store_id', sid).order('ticket_number'),
     ])
+
+    setIsAdmin(profile?.role === 'admin')
+
+    if (bks) {
+      const map: Record<number, Book> = {}
+      bks.forEach((b: Book) => { map[b.row_number] = b })
+      setBookMap(map)
+    }
 
     if (sess) {
       const sessionIsToday = sess.session_date === new Date().toLocaleDateString('en-CA')
@@ -782,22 +787,19 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         // Await this so the on-screen list, the session state and the PDF all agree.
         const { data: updated, error } = await supabase
           .from('sessions').update({ ticket_snapshot: list })
-          .eq('id', sess.id).select().single()
+          .eq('id', sess.id).select(SESSION_COLS).single()
         current = updated ?? { ...sess, ticket_snapshot: list }
         if (error) showToast('⚠ Could not save ticket prices — check connection')
       }
       setSession(current)
       setTickets(list)
 
-      // Previous day's books — used for "start changed" notes and "⬆ Yesterday".
-      const { prev } = await fetchPrevDay(sid, sess.session_date, list)
-      setPrevDay(prev)
-    }
+      setLoading(false)
 
-    if (bks) {
-      const map: Record<number, Book> = {}
-      bks.forEach(b => { map[b.row_number] = b })
-      setBookMap(map)
+      // Previous day's books — used for "start changed" notes and "⬆ Yesterday".
+      // Loaded after the page is shown so it doesn't slow the first paint.
+      fetchPrevDay(sid, sess.session_date, list).then(({ prev }) => setPrevDay(prev))
+      return
     }
     setLoading(false)
   }, [params.id])
@@ -852,7 +854,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     if (error) return null
     const next = change((cur?.corrections as Correction[] | null) || [])
     const { data, error: upErr } = await tracked(supabase.from('sessions')
-      .update({ corrections: next }).eq('id', sessionId).select().single())
+      .update({ corrections: next }).eq('id', sessionId).select(SESSION_COLS).single())
     return upErr ? null : (data as Session)
   }
 
@@ -1013,7 +1015,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         pdf_saved_at: new Date().toISOString(),
       })
       .eq('id', session.id)
-      .select().single())
+      .select(SESSION_COLS).single())
 
     if (data) setSession(data)
     setSavingPdf(false)
@@ -1038,7 +1040,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     if (grandAmt === n(session.ticket_revenue)) return
     const timer = setTimeout(async () => {
       const { data } = await tracked(supabase.from('sessions')
-        .update({ ticket_revenue: grandAmt }).eq('id', session.id).select().single())
+        .update({ ticket_revenue: grandAmt }).eq('id', session.id).select(SESSION_COLS).single())
       if (data) setSession(data)  // derived value — retried automatically on next change/load
     }, 1000)
     return () => clearTimeout(timer)

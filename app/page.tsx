@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, SESSION_COLS } from '@/lib/supabase'
 import type { Session, Book, TicketValue } from '@/lib/supabase'
 import { bookTotals, ticketsForSession, finalTotal } from '@/lib/ledger'
 
@@ -33,7 +33,7 @@ export default function HomePage() {
       setStoreId(sid); setStoreName(sname || 'Store')
 
       const { data: sessionList } = await supabase
-        .from('sessions').select('*')
+        .from('sessions').select(SESSION_COLS)
         .eq('user_id', session.user.id).eq('store_id', sid)
         .order('session_date', { ascending: false })
 
@@ -115,7 +115,7 @@ export default function HomePage() {
           user_id:          session.user.id,
           store_id:         storeId,
           ticket_revenue:   0,
-        }).select().single()
+        }).select('id').single()
 
       if (insertErr) {
         setCreateError(`Could not create session: ${insertErr.message}`)

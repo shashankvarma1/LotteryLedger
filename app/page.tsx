@@ -32,15 +32,18 @@ export default function HomePage() {
       if (!sid) { window.location.href = '/stores'; return }
       setStoreId(sid); setStoreName(sname || 'Store')
 
+      // One session per store per day, shared by all staff — so list by store, not by user.
       const { data: sessionList } = await supabase
         .from('sessions').select(SESSION_COLS)
-        .eq('user_id', session.user.id).eq('store_id', sid)
+        .eq('store_id', sid)
         .order('session_date', { ascending: false })
+        .order('created_at',   { ascending: true })
 
       const list: Session[] = sessionList || []
 
       const noRedirect = new URLSearchParams(window.location.search).get('noredirect')
       if (!noRedirect) {
+        // If old duplicates exist for today, open the first one created.
         const todayS = list.find((s: Session) => s.session_date === today)
         if (todayS && !redirected.current) {
           redirected.current = true
@@ -90,12 +93,15 @@ export default function HomePage() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) { window.location.href = '/auth'; return }
 
-      const { data: existing, error: checkErr } = await supabase
+      // Today's session for this store, whoever created it.
+      const findToday = () => supabase
         .from('sessions').select('id')
         .eq('store_id', storeId)
         .eq('session_date', today)
-        .eq('user_id', session.user.id)
-        .maybeSingle()
+        .order('created_at', { ascending: true })
+        .limit(1).maybeSingle()
+
+      const { data: existing, error: checkErr } = await findToday()
 
       if (checkErr) {
         setCreateError(`Error: ${checkErr.message}`)
@@ -116,6 +122,13 @@ export default function HomePage() {
           store_id:         storeId,
           ticket_revenue:   0,
         }).select('id').single()
+
+      // Someone else created today's session at the same moment (blocked by the
+      // unique index) — just open theirs.
+      if (insertErr?.code === '23505') {
+        const { data: theirs } = await findToday()
+        if (theirs) { window.location.href = `/session/${theirs.id}`; return }
+      }
 
       if (insertErr) {
         setCreateError(`Could not create session: ${insertErr.message}`)

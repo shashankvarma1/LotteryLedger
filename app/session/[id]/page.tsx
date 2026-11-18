@@ -69,7 +69,9 @@ async function fetchPrevDay(storeId: string, beforeDate: string, todayTickets: T
   const { data: ps, error } = await supabase
     .from('sessions').select('id, session_date, ticket_snapshot')
     .eq('store_id', storeId).lt('session_date', beforeDate)
-    .order('session_date', { ascending: false }).limit(1).maybeSingle()
+    .order('session_date', { ascending: false })
+    .order('created_at',   { ascending: true })   // old duplicates: use the first created
+    .limit(1).maybeSingle()
   if (error) return { prev: null, error: true }
   if (!ps)   return { prev: null, error: false }
 

@@ -2,25 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-import type { Session, Book, Correction } from '@/lib/supabase'
-
-type TicketValue = { ticket_number: number; value: number; book_size: number }
-
-function n(v: number | null | undefined) { return v ?? 0 }
-
-function calcSold(start: number, end: number, bookSize: number): number {
-  if (start === end) return 0
-  if (end > start)   return end - start
-  return (bookSize - start) + end
-}
-
-function calcTotal(sold: number, price: number) {
-  return parseFloat((sold * price).toFixed(2))
-}
-
-function money(v: number) {
-  return `${v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`
-}
+import type { Session, Book, Correction, TicketValue } from '@/lib/supabase'
+import { n, calcSold, calcTotal, money, bookTotals, totalBeforeCb as calcBeforeCb, finalTotal as calcFinal, hasCloseOutData } from '@/lib/ledger'
 
 function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -140,10 +123,6 @@ function correctionText(c: Correction) {
     : `#${c.ticket_number}: end changed ${c.old} → ${c.new} automatically — corrected from ${day}'s start number`
 }
 
-function finalOf(grandAmt: number, s: Session) {
-  return parseFloat((grandAmt + n(s.sr50_net_sales) - n(s.sr50_cashes) - n(s.ir34_totals) + n(s.cb_amount)).toFixed(2))
-}
-
 // ─── Generate HTML ────────────────────────────────────────────────────────────
 
 function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[], startNotes: string[]): string {
@@ -189,7 +168,7 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
   const totalCashes   = parseFloat((sr50Cashes + ir34Cashes).toFixed(2))
   const combinedSales = parseFloat((grandAmt + sr50NetSales).toFixed(2))
   const cbAmount      = n(session.cb_amount)
-  const finalTotal    = finalOf(grandAmt, session)
+  const finalTotal    = calcFinal(grandAmt, session)
   const cashDiff      = n(session.cash_diff)
 
   const noteItems: string[] = []
@@ -724,6 +703,11 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [savingPdf,  setSavingPdf]  = useState(false)
   const [prevDay,    setPrevDay]    = useState<PrevDay | null>(null)
   const redirected    = useRef(false)
+
+  // Past sessions are view-only for staff; only admins can change them.
+  // (Fixing today's start can still auto-correct the previous day's end — see correctPrevEnd.)
+  const isToday  = !!session && session.session_date === new Date().toLocaleDateString('en-CA')
+  const isLocked = !!session && !isToday && !isAdmin
   const startCellRefs = useRef<(HTMLDivElement | null)[]>([])
   const endCellRefs   = useRef<(HTMLDivElement | null)[]>([])
 
@@ -810,6 +794,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   useEffect(() => { load() }, [load])
 
   async function saveBookField(ticketIndex: number, field: 'start_num' | 'end_num', value: number | null) {
+    if (isLocked) return
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
     const existingBook = bookMap[ticketIndex + 1]
@@ -901,6 +886,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
   // "It's a new book" — put the previous day's end back and remove both notes.
   async function undoCorrection(c: Correction) {
+    if (isLocked) return
     if (!session || !prevDay || prevDay.date !== c.other_date) { showToast('⚠ Could not find the previous session'); return }
     const prevBook = prevDay.byTicket.get(c.ticket_number)
     if (!prevBook) return
@@ -920,6 +906,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   }
 
   async function toggleReturn(ticketIndex: number) {
+    if (isLocked) return
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
     const existingBook = bookMap[ticketIndex + 1]
@@ -943,6 +930,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   }
 
   async function copyFromYesterday() {
+    if (isLocked) return
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
 
@@ -993,6 +981,12 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     const html = generateHtml(session, bookMap, tickets, startNotes)
 
+    if (isLocked) {
+      setSavingPdf(false)
+      openPrint(html)
+      return
+    }
+
     const { data, error } = await tracked(supabase
       .from('sessions')
       .update({
@@ -1006,31 +1000,22 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     setSavingPdf(false)
     showToast(error || !data ? '⚠ Could not save PDF to History — printing anyway' : '✓ PDF saved to History')
 
+    openPrint(html)
+  }
+
+  function openPrint(html: string) {
     const w = window.open('', '_blank')
-    if (!w) return
+    if (!w) { showToast('⚠ Allow pop-ups to print'); return }
     w.document.write(html); w.document.close(); w.focus()
     setTimeout(() => w.print(), 500)
   }
 
   // ── Totals ──
-  const grandSold = tickets.reduce((sum, ticket, idx) => {
-    const b        = bookMap[idx + 1]
-    const bookSize = ticket.book_size || 100
-    if (!b || b.is_returned || b.start_num === null || b.end_num === null) return sum
-    return sum + calcSold(b.start_num, b.end_num, bookSize)
-  }, 0)
-
-  const grandAmt = tickets.reduce((sum, ticket, idx) => {
-    const b        = bookMap[idx + 1]
-    const bookSize = ticket.book_size || 100
-    if (!b || b.is_returned || b.start_num === null || b.end_num === null) return sum
-    const sold = calcSold(b.start_num, b.end_num, bookSize)
-    return parseFloat((sum + calcTotal(sold, ticket.value)).toFixed(2))
-  }, 0)
+  const { sold: grandSold, revenue: grandAmt } = bookTotals(Object.values(bookMap), tickets)
 
   // ── Save ticket_revenue (debounced) ──
   useEffect(() => {
-    if (!session || loading) return
+    if (!session || loading || isLocked) return
     if (grandAmt === n(session.ticket_revenue)) return
     const timer = setTimeout(async () => {
       const { data } = await tracked(supabase.from('sessions')
@@ -1038,7 +1023,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
       if (data) setSession(data)  // derived value — retried automatically on next change/load
     }, 1000)
     return () => clearTimeout(timer)
-  }, [grandAmt, session?.id, loading])
+  }, [grandAmt, session?.id, loading, isLocked])
 
   const enteredCount = tickets.filter((_, idx) => {
     const b = bookMap[idx + 1]
@@ -1049,9 +1034,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const sr50Cashes   = n(session?.sr50_cashes)
   const ir34Cashes   = n(session?.ir34_totals)
   const cbAmount     = n(session?.cb_amount)
-  const totalBeforeCb = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
-  const finalTotal   = parseFloat((totalBeforeCb + cbAmount).toFixed(2))
-  const hasFinalData = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0 || cbAmount > 0
+  const totalBeforeCb = session ? calcBeforeCb(grandAmt, session) : 0
+  const finalTotal    = session ? calcFinal(grandAmt, session) : 0
+  const hasFinalData  = session ? hasCloseOutData(session) : false
 
   const startChanges    = findStartChanges(tickets, bookMap, prevDay)
   const startChangeSet  = new Set(startChanges.map(c => c.ticket_number))
@@ -1065,8 +1050,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   if (!session) return <div className="empty" style={{ marginTop: 80 }}>NOT FOUND</div>
 
   const sessionDate = new Date(session.session_date + 'T00:00:00')
-  const isToday     = session.session_date === new Date().toLocaleDateString('en-CA')
-  const isLocked    = false
 
   return (
     <div style={{ maxWidth: 620, margin: '0 auto', paddingBottom: 80 }}>
@@ -1127,29 +1110,6 @@ export default function SessionPage({ params }: { params: { id: string } }) {
           </button>
         )}
       </div>
-
-      {startNotes.length > 0 && (
-        <div style={{ padding: '10px 14px', background: 'rgba(240,165,0,0.06)', borderBottom: '1px solid var(--line-dk)' }}>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--gold)', letterSpacing: '.08em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 }}>
-            ⚠ Auto Notes for Owner
-          </div>
-          {corrections.map(c => (
-            <div key={`${c.kind}-${c.ticket_number}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-mid)', lineHeight: 1.6 }}>
-              <span style={{ flex: 1 }}>✎ {correctionText(c)}</span>
-              {c.kind === 'start' && !isLocked && (
-                <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0, fontSize: 10, padding: '2px 8px' }}
-                  title="Use this if it's a new book and the previous day's end was actually right"
-                  onClick={() => undoCorrection(c)}>
-                  Undo (new book)
-                </button>
-              )}
-            </div>
-          ))}
-          {mismatchNotes.map(t => (
-            <div key={t} style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-mid)', lineHeight: 1.6 }}>{t}</div>
-          ))}
-        </div>
-      )}
 
       {tickets.length === 0 && (
         <div style={{ margin: 18, padding: '14px 18px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 13, color: 'var(--rose)' }}>
@@ -1318,6 +1278,29 @@ export default function SessionPage({ params }: { params: { id: string } }) {
             <div style={{ fontSize: 13, color: 'var(--ink-faint)' }}>Tap to calculate final total</div>
           </div>
           <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--gold)' }}>${grandAmt.toFixed(2)} →</div>
+        </div>
+      )}
+
+      {startNotes.length > 0 && (
+        <div style={{ margin: '0', padding: '12px 18px', background: 'rgba(240,165,0,0.08)', borderTop: '2px solid var(--gold)', borderBottom: '2px solid var(--gold)' }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--gold)', letterSpacing: '.08em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 }}>
+            ⚠ Auto Notes for Owner
+          </div>
+          {corrections.map(c => (
+            <div key={`${c.kind}-${c.ticket_number}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', lineHeight: 1.6, padding: '3px 0' }}>
+              <span style={{ flex: 1 }}>✎ {correctionText(c)}</span>
+              {c.kind === 'start' && !isLocked && (
+                <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0, fontSize: 10, padding: '2px 8px' }}
+                  title="Use this if it's a new book and the previous day's end was actually right"
+                  onClick={() => undoCorrection(c)}>
+                  Undo (new book)
+                </button>
+              )}
+            </div>
+          ))}
+          {mismatchNotes.map(t => (
+            <div key={t} style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', lineHeight: 1.6, padding: '3px 0' }}>{t}</div>
+          ))}
         </div>
       )}
 

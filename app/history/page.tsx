@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, SESSION_COLS } from '@/lib/supabase'
 import type { Session, Book, TicketValue } from '@/lib/supabase'
 import { bookTotals, ticketsForSession, finalTotal, hasCloseOutData } from '@/lib/ledger'
 
@@ -88,7 +88,7 @@ export default function HistoryPage() {
       setStoreName(sname || 'Store')
 
       const { data: sessionList } = await supabase
-        .from('sessions').select('*')
+        .from('sessions').select(SESSION_COLS)
         .eq('store_id', sid)
         .order('session_date', { ascending: false })
 
@@ -129,14 +129,20 @@ export default function HistoryPage() {
     window.location.href = '/auth'
   }
 
-  function openPdf(pdfHtml: string) {
+  async function openPdf(sessionId: string) {
     const w = window.open('', '_blank')
-    if (w) {
-      w.document.write(pdfHtml)
-      w.document.close()
-      w.focus()
-      setTimeout(() => w.print(), 320)
+    if (!w) { alert('Allow pop-ups to open the PDF.'); return }
+    w.document.write('<p style="font-family:sans-serif;padding:24px">Loading report…</p>')
+    const { data, error } = await supabase.from('sessions').select('pdf_html').eq('id', sessionId).single()
+    if (error || !data?.pdf_html) {
+      w.document.body.innerHTML = '<p style="font-family:sans-serif;padding:24px">Could not load the report — check connection and try again.</p>'
+      return
     }
+    w.document.open()
+    w.document.write(data.pdf_html)
+    w.document.close()
+    w.focus()
+    setTimeout(() => w.print(), 320)
   }
 
   function exportCSV() {
@@ -274,7 +280,7 @@ export default function HistoryPage() {
                     const hasSR50      = hasCloseOutData(s)
                     const final        = finalTotalOf(s)
                     const cashDiff     = s.cash_diff ?? 0
-                    const pdfHtml      = s.pdf_html
+                    const hasPdf       = !!s.pdf_saved_at
 
                     return (
                       <div key={s.id} style={{ borderBottom: i < monthSessions.length - 1 ? '1px solid var(--line)' : 'none' }}>
@@ -322,9 +328,9 @@ export default function HistoryPage() {
 
                         {/* PDF button + delete row */}
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px 8px', gap: 8 }}>
-                          {pdfHtml ? (
+                          {hasPdf ? (
                             <button
-                              onClick={() => openPdf(pdfHtml)}
+                              onClick={() => openPdf(s.id)}
                               style={{ display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: '1px solid var(--line-dk)', cursor: 'pointer', color: 'var(--sky)', fontSize: 11, padding: '5px 10px', borderRadius: 6, fontFamily: 'var(--mono)', fontWeight: 600 }}
                             >
                               ⎙ Open PDF

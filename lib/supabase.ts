@@ -15,6 +15,11 @@ if (typeof window !== 'undefined') {
   })
 }
 
+// Every sessions column EXCEPT pdf_html. The saved report HTML is large, so only
+// load it when someone actually opens a PDF — never on page load or after a save.
+// (Cast to '*' only for typing — the client is untyped, so rows are `any` either way.)
+export const SESSION_COLS = 'id, session_date, price_per_ticket, sr50_net_sales, sr50_commission, sr50_cashes, sr50_cash_bonus, sr50_claims_bonus, sr50_adjustments, sr50_service_fee, sr50_net_due, ir34_tickets, ir34_totals, notes, user_id, store_id, created_at, ticket_revenue, ticket_snapshot, pdf_saved_at, cb_amount, cash_diff, cash_note, corrections' as '*'
+
 export type Session = {
   id: string
   session_date: string

@@ -37,6 +37,21 @@ export type Session = {
   ticket_snapshot: unknown
   pdf_html: string | null
   pdf_saved_at: string | null
+  cb_amount: number | null      // "Cashed from Back" — cashes paid at the other register; added to final total
+  cash_diff: number | null      // cash short (negative) / over (positive) vs. final total
+  cash_note: string | null      // staff explanation for the short/over
+  corrections: Correction[] | null  // automatic start/end corrections between consecutive days
+}
+
+// 'start' lives on the later session (staff fixed today's start),
+// 'end' lives on the earlier session (its end was changed automatically to match).
+export type Correction = {
+  kind:          'start' | 'end'
+  ticket_number: number
+  old:           number   // original value (kept across repeated edits)
+  new:           number
+  other_date:    string   // the other session's date
+  at:            string   // ISO timestamp of the latest change
 }
 
 export type Book = {

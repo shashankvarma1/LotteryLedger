@@ -1,7 +1,8 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
-import type { Session } from '@/lib/supabase'
+import type { Session, Book, TicketValue } from '@/lib/supabase'
+import { bookTotals, ticketsForSession, finalTotal, hasCloseOutData } from '@/lib/ledger'
 
 type SessionWithStats = Session & {
   book_count?:    number
@@ -9,11 +10,44 @@ type SessionWithStats = Session & {
   total_revenue?: number
 }
 
-function calcSoldSafe(start: number, end: number, bookSize: number | null): number {
-  if (start === end) return 0
-  if (end > start) return end - start
-  if (bookSize && bookSize > 0) return (bookSize - start) + end
-  return 0
+function finalTotalOf(s: SessionWithStats) {
+  return finalTotal(s.total_revenue ?? 0, s)
+}
+
+// Load books for many sessions in a few requests (instead of one per session).
+async function loadBooksBySession(sessionIds: string[]) {
+  const bySession = new Map<string, Book[]>()
+  const chunks: string[][] = []
+  for (let i = 0; i < sessionIds.length; i += 100) chunks.push(sessionIds.slice(i, i + 100))
+
+  // Supabase returns at most 1000 rows per request, so page through each chunk.
+  const PAGE = 1000
+  async function loadChunk(ids: string[]): Promise<Book[] | null> {
+    const all: Book[] = []
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase.from('books').select('*')
+        .in('session_id', ids).order('id').range(from, from + PAGE - 1)
+      if (error) return null
+      all.push(...((data || []) as Book[]))
+      if (!data || data.length < PAGE) return all
+    }
+  }
+
+  const results = await Promise.all(chunks.map(loadChunk))
+  for (const books of results) {
+    if (!books) return null
+    books.forEach(b => {
+      const list = bySession.get(b.session_id) || []
+      list.push(b)
+      bySession.set(b.session_id, list)
+    })
+  }
+  return bySession
+}
+
+function csvCell(v: string | number) {
+  const s = String(v)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
 function DeleteModal({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
@@ -39,6 +73,7 @@ export default function HistoryPage() {
   const [storeName, setStoreName] = useState('')
   const [search,    setSearch]    = useState('')
   const [deleteId,  setDeleteId]  = useState<string | null>(null)
+  const [loadError, setLoadError] = useState(false)
   const redirected = useRef(false)
 
   useEffect(() => {
@@ -64,39 +99,15 @@ export default function HistoryPage() {
         .from('ticket_values').select('*')
         .eq('store_id', sid).order('ticket_number')
 
-      const enriched = await Promise.all(sessionList.map(async (s: Session) => {
-        const { data: books } = await supabase
-          .from('books').select('*')
-          .eq('session_id', s.id).order('row_number')
+      const booksBySession = await loadBooksBySession(sessionList.map((s: Session) => s.id))
+      if (!booksBySession) setLoadError(true)
 
-        const active = (books || []).filter((b: { is_returned: boolean }) => !b.is_returned)
-
-        // ── Use ticket_snapshot if available so history matches session page exactly ──
-        const snapshot = s.ticket_snapshot as { ticket_number: number; value: number; book_size: number }[] | null
-        const ticketsForCalc = (snapshot && snapshot.length > 0) ? snapshot : (tvs || [])
-
-        const totalSold = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-          const ticket   = ticketsForCalc[b.row_number - 1]
-          const bookSize = ticket?.book_size ?? null
-          const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
-          return sum + sold
-        }, 0)
-
-        const totalRevenue = active.reduce((sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-          const ticket   = ticketsForCalc[b.row_number - 1]
-          const price    = ticket?.value    ?? 0
-          const bookSize = ticket?.book_size ?? null
-          const sold     = calcSoldSafe(b.start_num ?? 0, b.end_num ?? 0, bookSize)
-          return parseFloat((sum + sold * price).toFixed(2))
-        }, 0)
-
-        return {
-          ...s,
-          book_count:    (books || []).length,
-          total_sold:    totalSold,
-          total_revenue: totalRevenue,
-        }
-      }))
+      const enriched = sessionList.map((s: Session) => {
+        const books = booksBySession?.get(s.id) || []
+        // Same ticket list and math as the session page, so totals always match.
+        const { sold, revenue } = bookTotals(books, ticketsForSession(s, (tvs || []) as TicketValue[]))
+        return { ...s, book_count: books.length, total_sold: sold, total_revenue: revenue }
+      })
 
       setSessions(enriched)
       setLoading(false)
@@ -105,7 +116,8 @@ export default function HistoryPage() {
 
   async function confirmDelete() {
     if (!deleteId) return
-    await supabase.from('sessions').delete().eq('id', deleteId)
+    const { error } = await supabase.from('sessions').delete().eq('id', deleteId)
+    if (error) { alert('Could not delete — check connection and try again.'); setDeleteId(null); return }
     setSessions(prev => prev.filter(s => s.id !== deleteId))
     setDeleteId(null)
   }
@@ -133,14 +145,16 @@ export default function HistoryPage() {
       const netSales   = s.sr50_net_sales ?? 0
       const sr50Cashes = s.sr50_cashes   ?? 0
       const ir34Cashes = s.ir34_totals   ?? 0
-      const finalTotal = parseFloat((rev + netSales - sr50Cashes - ir34Cashes).toFixed(2))
+      const cb         = s.cb_amount     ?? 0
+      const diff       = s.cash_diff     ?? 0
       return [
         s.session_date, s.book_count ?? 0, s.total_sold ?? 0,
         rev.toFixed(2), netSales.toFixed(2), sr50Cashes.toFixed(2),
-        ir34Cashes.toFixed(2), finalTotal.toFixed(2), s.notes ?? '',
-      ].join(',')
+        ir34Cashes.toFixed(2), cb.toFixed(2), finalTotalOf(s).toFixed(2),
+        diff.toFixed(2), s.cash_note ?? '', s.notes ?? '',
+      ].map(csvCell).join(',')
     })
-    const csv  = ['Date,Books,Sold,Ticket Revenue,SR50 Net Sales,SR50 Cashes,IR34 Cashes,Final Total,Notes', ...rows].join('\n')
+    const csv  = ['Date,Books,Sold,Ticket Revenue,SR50 Net Sales,SR50 Cashes,IR34 Cashes,CB,Final Total,Cash Short(-)/Over(+),Cash Note,Notes', ...rows].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a    = document.createElement('a')
     a.href     = URL.createObjectURL(blob)
@@ -168,11 +182,7 @@ export default function HistoryPage() {
 
   const totalDays    = filtered.length
   const totalRevenue = filtered.reduce((s, x) => s + (x.total_revenue ?? 0), 0)
-  const grandFinal   = filtered.reduce((s, x) => {
-    const rev = x.total_revenue ?? 0
-    const net = (x.sr50_net_sales ?? 0) - (x.sr50_cashes ?? 0) - (x.ir34_totals ?? 0)
-    return parseFloat((s + rev + net).toFixed(2))
-  }, 0)
+  const grandFinal   = filtered.reduce((s, x) => parseFloat((s + finalTotalOf(x)).toFixed(2)), 0)
 
   return (
     <div style={{ maxWidth: 520, margin: '0 auto', paddingBottom: 60 }}>
@@ -194,6 +204,12 @@ export default function HistoryPage() {
           <button onClick={signOut} className="btn btn-ghost btn-sm">Out</button>
         </div>
       </header>
+
+      {loadError && (
+        <div style={{ margin: '18px 18px 0', padding: '12px 16px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 13, color: 'var(--rose)' }}>
+          ⚠ Could not load ticket entries — totals below may show $0. Check connection and reload.
+        </div>
+      )}
 
       {/* Summary cards */}
       {sessions.length > 0 && (
@@ -233,11 +249,7 @@ export default function HistoryPage() {
         ) : (
           Object.entries(grouped).map(([month, monthSessions]) => {
             const monthRevenue = monthSessions.reduce((s, x) => s + (x.total_revenue ?? 0), 0)
-            const monthFinal   = monthSessions.reduce((s, x) => {
-              const rev = x.total_revenue ?? 0
-              const net = (x.sr50_net_sales ?? 0) - (x.sr50_cashes ?? 0) - (x.ir34_totals ?? 0)
-              return parseFloat((s + rev + net).toFixed(2))
-            }, 0)
+            const monthFinal   = monthSessions.reduce((s, x) => parseFloat((s + finalTotalOf(x)).toFixed(2)), 0)
 
             return (
               <div key={month} style={{ marginBottom: 20 }}>
@@ -259,11 +271,9 @@ export default function HistoryPage() {
                     const date         = new Date(s.session_date + 'T00:00:00')
                     const isToday      = s.session_date === new Date().toLocaleDateString('en-CA')
                     const rev          = s.total_revenue ?? 0
-                    const sr50NetSales = s.sr50_net_sales ?? 0
-                    const sr50Cashes   = s.sr50_cashes   ?? 0
-                    const ir34Cashes   = s.ir34_totals   ?? 0
-                    const hasSR50      = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0
-                    const finalTotal   = parseFloat((rev + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+                    const hasSR50      = hasCloseOutData(s)
+                    const final        = finalTotalOf(s)
+                    const cashDiff     = s.cash_diff ?? 0
                     const pdfHtml      = s.pdf_html
 
                     return (
@@ -280,13 +290,24 @@ export default function HistoryPage() {
                               {rev > 0 ? ` · $${rev.toFixed(2)}` : ''}
                               {s.notes ? ` · ${s.notes}` : ''}
                             </div>
+                            {(s.corrections?.length ?? 0) > 0 && (
+                              <div style={{ fontSize: 12, fontFamily: 'var(--mono)', marginTop: 3, color: 'var(--gold)' }}>
+                                ✎ {s.corrections!.length} number correction{s.corrections!.length > 1 ? 's' : ''} — open to see
+                              </div>
+                            )}
+                            {cashDiff !== 0 && (
+                              <div style={{ fontSize: 12, fontFamily: 'var(--mono)', marginTop: 3, color: cashDiff < 0 ? 'var(--rose)' : 'var(--sky)' }}>
+                                Cash {cashDiff < 0 ? 'SHORT' : 'OVER'} ${Math.abs(cashDiff).toFixed(2)}
+                                {s.cash_note ? ` — ${s.cash_note}` : ''}
+                              </div>
+                            )}
                           </div>
 
                           <div style={{ textAlign: 'right', marginRight: 4, minWidth: 80 }}>
                             {hasSR50 ? (
                               <>
-                                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Final</div>
-                                <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)' }}>${finalTotal.toFixed(2)}</div>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: final >= 0 ? 'var(--emerald)' : 'var(--rose)', fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase' }}>Final</div>
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: final >= 0 ? 'var(--emerald)' : 'var(--rose)' }}>${final.toFixed(2)}</div>
                               </>
                             ) : rev > 0 ? (
                               <>

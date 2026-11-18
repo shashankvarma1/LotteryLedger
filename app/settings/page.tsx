@@ -74,6 +74,7 @@ export default function SettingsPage() {
   const [storeId,    setStoreId]    = useState<string | null>(null)
   const [storeName,  setStoreName]  = useState('')
   const [flash,      setFlash]      = useState('')
+  const [flashErr,   setFlashErr]   = useState(false)
   const [showSetup,  setShowSetup]  = useState(false)
   const [lastTicket, setLastTicket] = useState('')
   const [defaultVal, setDefaultVal] = useState('')
@@ -135,7 +136,11 @@ export default function SettingsPage() {
     document.body.classList.toggle('text-lg', next)
   }
 
-  function showFlash(msg: string) { setFlash(msg); setTimeout(() => setFlash(''), 2500) }
+  function showFlash(msg: string, isError = false) {
+    setFlash(msg); setFlashErr(isError)
+    setTimeout(() => setFlash(''), isError ? 4000 : 2500)
+  }
+  const SAVE_FAILED = '⚠ Not saved — check connection'
 
   const filtered = tickets.filter(t =>
     search === '' || String(t.ticket_number).includes(search) || String(t.value).includes(search)
@@ -146,13 +151,15 @@ export default function SettingsPage() {
     const existing = tickets.find(t => t.ticket_number === ticket_number)
     if (!existing) return
     const updated = { ...existing, [field]: val }
-    await supabase.from('ticket_values').upsert({
+    if (updated.value === existing.value && updated.book_size === existing.book_size) return
+    const { error } = await supabase.from('ticket_values').upsert({
       ticket_number,
       value:     updated.value,
       book_size: updated.book_size,
       user_id:   ownerUserId,  // always use owner's user_id
       store_id:  storeId,
     })
+    if (error) { showFlash(SAVE_FAILED, true); return }
     setTickets(prev => prev.map(t => t.ticket_number === ticket_number ? updated : t))
     if (navigator.vibrate) navigator.vibrate(30)
   }
@@ -162,18 +169,30 @@ export default function SettingsPage() {
     const val  = parseFloat(defaultVal)
     const size = parseInt(defaultSize) || 100
     if (!last || last < 1 || isNaN(val) || val < 0 || !ownerUserId || !storeId) return
+    const overwritten = tickets.filter(t => t.ticket_number <= last).length
+    if (overwritten > 0 && !confirm(
+      `This will RESET ${overwritten} existing ticket${overwritten > 1 ? 's' : ''} (#1–#${last}) to $${val.toFixed(2)} with ${size} per book.
+
+` +
+      `Their current prices will be lost. Continue?`
+    )) return
     setGenerating(true)
     const rows = Array.from({ length: last }, (_, i) => ({
       ticket_number: i + 1, value: val, book_size: size,
       user_id: ownerUserId, store_id: storeId,
     }))
-    for (let i = 0; i < rows.length; i += 50)
-      await supabase.from('ticket_values').upsert(rows.slice(i, i + 50))
+    let failed = false
+    for (let i = 0; i < rows.length; i += 50) {
+      const { error } = await supabase.from('ticket_values').upsert(rows.slice(i, i + 50))
+      if (error) { failed = true; break }
+    }
+    // Reload either way so the screen shows what is really saved.
     const { data } = await supabase.from('ticket_values').select('*')
       .eq('store_id', storeId).order('ticket_number')
-    setTickets(data || [])
-    setShowSetup(false); setLastTicket(''); setDefaultVal(''); setDefaultSize('100')
+    if (data) setTickets(data)
     setGenerating(false)
+    if (failed) { showFlash('⚠ Some tickets were not saved — check connection and try again', true); return }
+    setShowSetup(false); setLastTicket(''); setDefaultVal(''); setDefaultSize('100')
     showFlash(`✓ ${last} tickets created`)
   }
 
@@ -182,11 +201,14 @@ export default function SettingsPage() {
     const val  = parseFloat(newVal)
     const size = parseInt(newSize) || 100
     if (!num || isNaN(num) || isNaN(val) || val < 0 || !ownerUserId || !storeId) return
+    const existing = tickets.find(t => t.ticket_number === num)
+    if (existing && !confirm(`Ticket #${num} already exists ($${existing.value}). Replace it with $${val.toFixed(2)}?`)) return
     setAdding(true)
-    await supabase.from('ticket_values').upsert({
+    const { error } = await supabase.from('ticket_values').upsert({
       ticket_number: num, value: val, book_size: size,
       user_id: ownerUserId, store_id: storeId,
     })
+    if (error) { setAdding(false); showFlash(SAVE_FAILED, true); return }
     setTickets(prev => {
       const rest = prev.filter(t => t.ticket_number !== num)
       return [...rest, { ticket_number: num, value: val, book_size: size }]
@@ -198,9 +220,10 @@ export default function SettingsPage() {
 
   async function deleteTicket(ticket_number: number) {
     if (!confirm(`Delete ticket #${ticket_number}?`)) return
-    await supabase.from('ticket_values').delete()
+    const { error } = await supabase.from('ticket_values').delete()
       .eq('ticket_number', ticket_number)
       .eq('store_id', storeId!)
+    if (error) { showFlash(SAVE_FAILED, true); return }
     setTickets(prev => prev.filter(t => t.ticket_number !== ticket_number))
     showFlash('Deleted')
   }
@@ -224,7 +247,7 @@ export default function SettingsPage() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          {flash && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--emerald)', fontWeight: 600 }}>{flash}</span>}
+          {flash && <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: flashErr ? 'var(--rose)' : 'var(--emerald)', fontWeight: 600 }}>{flash}</span>}
           <button onClick={signOut} className="btn btn-ghost btn-sm">Out</button>
         </div>
       </header>

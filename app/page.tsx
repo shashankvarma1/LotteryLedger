@@ -1,18 +1,12 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
-import type { Session } from '@/lib/supabase'
+import type { Session, Book, TicketValue } from '@/lib/supabase'
+import { bookTotals, ticketsForSession, finalTotal } from '@/lib/ledger'
 
 type SessionWithRevenue = Session & {
   computed_revenue: number
   computed_final:   number
-}
-
-function calcSoldSafe(start: number, end: number, bookSize: number | null): number {
-  if (start === end) return 0
-  if (end > start) return end - start
-  if (bookSize && bookSize > 0) return (bookSize - start) + end
-  return 0
 }
 
 export default function HomePage() {
@@ -62,39 +56,17 @@ export default function HomePage() {
 
       const recent = list.slice(0, 5)
 
-      const enriched = await Promise.all(recent.map(async (s) => {
-        const { data: books } = await supabase
-          .from('books').select('*')
-          .eq('session_id', s.id)
+      // One request for the recent sessions' books (instead of one per session).
+      const { data: recentBooks } = recent.length
+        ? await supabase.from('books').select('*').in('session_id', recent.map(s => s.id)).range(0, 4999)
+        : { data: [] as Book[] }
 
-        const active = (books || []).filter(
-          (b: { is_returned: boolean }) => !b.is_returned
-        )
-
-        // ── Use ticket_snapshot if available — same as session page and history ──
-        const snapshot = s.ticket_snapshot as { ticket_number: number; value: number; book_size: number }[] | null
-        const ticketsForCalc = (snapshot && snapshot.length > 0) ? snapshot : (tvs || [])
-
-        const ticketRevenue = active.reduce(
-          (sum: number, b: { row_number: number; start_num: number | null; end_num: number | null }) => {
-            const ticket   = ticketsForCalc[b.row_number - 1]
-            const price    = ticket?.value    ?? 0
-            const bookSize = ticket?.book_size ?? null
-            const start    = b.start_num ?? 0
-            const end      = b.end_num   ?? 0
-            const sold     = calcSoldSafe(start, end, bookSize)
-            return parseFloat((sum + sold * price).toFixed(2))
-          },
-          0
-        )
-
-        const sr50Net    = s.sr50_net_sales ?? 0
-        const sr50Cashes = s.sr50_cashes   ?? 0
-        const ir34Cashes = s.ir34_totals   ?? 0
-        const finalTotal = parseFloat((ticketRevenue + sr50Net - sr50Cashes - ir34Cashes).toFixed(2))
-
-        return { ...s, computed_revenue: ticketRevenue, computed_final: finalTotal }
-      }))
+      const enriched = recent.map(s => {
+        const books = ((recentBooks || []) as Book[]).filter(b => b.session_id === s.id)
+        // Same ticket list and math as the session page, so totals always match.
+        const { revenue } = bookTotals(books, ticketsForSession(s, (tvs || []) as TicketValue[]))
+        return { ...s, computed_revenue: revenue, computed_final: finalTotal(revenue, s) }
+      })
 
       const rest = list.slice(5).map(s => ({ ...s, computed_revenue: 0, computed_final: 0 }))
       setSessions([...enriched, ...rest])

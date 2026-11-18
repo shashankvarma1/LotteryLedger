@@ -91,7 +91,8 @@ export default function HomePage() {
         const sr50Net    = s.sr50_net_sales ?? 0
         const sr50Cashes = s.sr50_cashes   ?? 0
         const ir34Cashes = s.ir34_totals   ?? 0
-        const finalTotal = parseFloat((ticketRevenue + sr50Net - sr50Cashes - ir34Cashes).toFixed(2))
+        const cbAmount   = s.cb_amount     ?? 0
+        const finalTotal = parseFloat((ticketRevenue + sr50Net - sr50Cashes - ir34Cashes + cbAmount).toFixed(2))
 
         return { ...s, computed_revenue: ticketRevenue, computed_final: finalTotal }
       }))

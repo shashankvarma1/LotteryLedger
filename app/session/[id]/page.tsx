@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-import type { Session, Book } from '@/lib/supabase'
+import type { Session, Book, Correction } from '@/lib/supabase'
 
 type TicketValue = { ticket_number: number; value: number; book_size: number }
 
@@ -18,15 +18,140 @@ function calcTotal(sold: number, price: number) {
   return parseFloat((sold * price).toFixed(2))
 }
 
+function money(v: number) {
+  return `${v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`
+}
+
+function esc(s: string) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+function toTicket(t: TicketValue): TicketValue {
+  return { ticket_number: t.ticket_number, value: Number(t.value), book_size: t.book_size }
+}
+
+// Books are stored by row position (row_number = index + 1), so the ticket
+// order must never shift for an existing session. Keep the snapshot's order,
+// refresh prices from the live list, and append newly added tickets at the end.
+function mergeSnapshot(snapshot: TicketValue[] | null, live: TicketValue[]): TicketValue[] {
+  if (!snapshot || snapshot.length === 0) return live.map(toTicket)
+  const liveByNum = new Map(live.map(t => [t.ticket_number, t]))
+  const merged    = snapshot.map(old => {
+    const cur = liveByNum.get(old.ticket_number)
+    return cur ? toTicket(cur) : old
+  })
+  const known = new Set(snapshot.map(t => t.ticket_number))
+  live.forEach(t => { if (!known.has(t.ticket_number)) merged.push(toTicket(t)) })
+  return merged
+}
+
+// Counts in-flight saves so we only warn on page leave when something is unsaved.
+let pendingSaves = 0
+async function tracked<T>(p: PromiseLike<T>): Promise<T> {
+  pendingSaves++
+  try { return await p } finally { pendingSaves-- }
+}
+
+// ─── Previous day ─────────────────────────────────────────────────────────────
+
+type PrevDay = {
+  date:      string
+  byTicket:  Map<number, Book>    // ticket_number → previous session's book
+  priceOf:   Map<number, number>  // ticket_number → previous session's price
+}
+
+type StartChange = {
+  ticket_number: number
+  prevEnd:       number
+  start:         number
+  oldPrice:      number | null
+  newPrice:      number
+}
+
+// Most recent session before this one (handles days the store was closed).
+// Books are matched by ticket number so the result doesn't depend on row order.
+async function fetchPrevDay(storeId: string, beforeDate: string, todayTickets: TicketValue[]):
+  Promise<{ prev: PrevDay | null; error: boolean }> {
+  const { data: ps, error } = await supabase
+    .from('sessions').select('id, session_date, ticket_snapshot')
+    .eq('store_id', storeId).lt('session_date', beforeDate)
+    .order('session_date', { ascending: false }).limit(1).maybeSingle()
+  if (error) return { prev: null, error: true }
+  if (!ps)   return { prev: null, error: false }
+
+  const { data: books, error: bErr } = await supabase
+    .from('books').select('*').eq('session_id', ps.id)
+  if (bErr) return { prev: null, error: true }
+
+  const snap     = (ps.ticket_snapshot as TicketValue[] | null) || []
+  const byTicket = new Map<number, Book>()
+  const priceOf  = new Map<number, number>()
+  snap.forEach(t => priceOf.set(t.ticket_number, Number(t.value)))
+  ;(books || []).forEach((b: Book) => {
+    // Old sessions without a snapshot: assume the same row order as today.
+    const tn = snap.length > 0 ? snap[b.row_number - 1]?.ticket_number : todayTickets[b.row_number - 1]?.ticket_number
+    if (tn !== undefined) byTicket.set(tn, b)
+  })
+  return { prev: { date: ps.session_date, byTicket, priceOf }, error: false }
+}
+
+function findStartChanges(tickets: TicketValue[], bookMap: Record<number, Book>, prev: PrevDay | null): StartChange[] {
+  if (!prev) return []
+  const out: StartChange[] = []
+  tickets.forEach((t, idx) => {
+    const b = bookMap[idx + 1]
+    const p = prev.byTicket.get(t.ticket_number)
+    if (!b || b.is_returned || b.start_num === null) return
+    if (!p || p.is_returned || p.end_num === null) return
+    if (b.start_num === p.end_num) return
+    out.push({
+      ticket_number: t.ticket_number,
+      prevEnd:       p.end_num,
+      start:         b.start_num,
+      oldPrice:      prev.priceOf.get(t.ticket_number) ?? null,
+      newPrice:      t.value,
+    })
+  })
+  return out
+}
+
+function startChangeText(c: StartChange, prevDate: string) {
+  const day = new Date(prevDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  let s = `#${c.ticket_number}: start changed to ${c.start} — previous end (${day}) was ${c.prevEnd}`
+  if (c.oldPrice !== null && c.oldPrice !== c.newPrice) s += ` · price $${c.oldPrice} → $${c.newPrice} (new book?)`
+  return s
+}
+
+// Add/replace the entry for this ticket, keeping the very first "old" value.
+// If the number ends up back at its original value, the entry is dropped.
+function mergeCorrection(list: Correction[], c: Correction): Correction[] {
+  const same  = (x: Correction) => x.kind === c.kind && x.ticket_number === c.ticket_number
+  const prior = list.find(same)
+  const rest  = list.filter(x => !same(x))
+  const old   = prior ? prior.old : c.old
+  return old === c.new ? rest : [...rest, { ...c, old }]
+}
+
+function correctionText(c: Correction) {
+  const day = new Date(c.other_date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return c.kind === 'start'
+    ? `#${c.ticket_number}: start corrected ${c.old} → ${c.new} — ${day} end number was also changed from ${c.old} to ${c.new}`
+    : `#${c.ticket_number}: end changed ${c.old} → ${c.new} automatically — corrected from ${day}'s start number`
+}
+
+function finalOf(grandAmt: number, s: Session) {
+  return parseFloat((grandAmt + n(s.sr50_net_sales) - n(s.sr50_cashes) - n(s.ir34_totals) + n(s.cb_amount)).toFixed(2))
+}
+
 // ─── Generate HTML ────────────────────────────────────────────────────────────
 
-function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[]): string {
+function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: TicketValue[], startNotes: string[]): string {
   const dateStr   = new Date(session.session_date + 'T00:00:00').toLocaleDateString('en-US', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
-  const storeName     = localStorage.getItem('selected_store_name') || ''
-  const snapshot      = session.ticket_snapshot as TicketValue[] | null
-  const ticketsForPdf = (snapshot && snapshot.length > 0) ? snapshot : tickets
+  const storeName     = esc(localStorage.getItem('selected_store_name') || '')
+  const ticketsForPdf = tickets
 
   let grandSold = 0
   let grandAmt  = 0
@@ -63,7 +188,19 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
   const ir34Cashes    = n(session.ir34_totals)
   const totalCashes   = parseFloat((sr50Cashes + ir34Cashes).toFixed(2))
   const combinedSales = parseFloat((grandAmt + sr50NetSales).toFixed(2))
-  const finalTotal    = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+  const cbAmount      = n(session.cb_amount)
+  const finalTotal    = finalOf(grandAmt, session)
+  const cashDiff      = n(session.cash_diff)
+
+  const noteItems: string[] = []
+  if (session.notes) noteItems.push(`<div class="note-item staff"><b>Staff note:</b> ${esc(session.notes)}</div>`)
+  if (cashDiff !== 0) {
+    noteItems.push(`<div class="note-item ${cashDiff < 0 ? 'neg' : 'pos'}"><b>Cash ${cashDiff < 0 ? 'SHORT' : 'OVER'} $${Math.abs(cashDiff).toFixed(2)}</b>${session.cash_note ? ` — ${esc(session.cash_note)}` : ''}</div>`)
+  }
+  startNotes.forEach(t => noteItems.push(`<div class="note-item warn">⚠ ${esc(t)}</div>`))
+  const notesSection = noteItems.length
+    ? `<div class="notes-box"><div class="notes-title">📝 Notes for Owner (${noteItems.length})</div>${noteItems.join('')}</div>`
+    : ''
 
   const enteredCount = ticketsForPdf.filter((_, i) => {
     const b = bookMap[i + 1]
@@ -134,6 +271,13 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
     .final-value.positive { color: #059669; } .final-value.negative { color: #e11d48; }
     .final-formula { font-size: 10px; color: #94a3b8; margin-top: 6px; line-height: 1.5; }
     .final-icon { font-size: 52px; opacity: .12; }
+    .closeout { break-inside: avoid; page-break-inside: avoid; margin-bottom: 24px; }
+    .closeout .final-box { margin-bottom: 12px; }
+    .notes-box { background: #fffbeb; border: 2px solid #f59e0b; border-radius: 12px; padding: 12px 18px; }
+    .notes-title { font-family: 'DM Mono', monospace; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: #b45309; margin-bottom: 6px; }
+    .note-item { padding: 8px 0; border-bottom: 1px solid #fde68a; font-size: 14px; line-height: 1.5; color: #0f172a; }
+    .note-item:last-child { border-bottom: none; }
+    .note-item.neg { color: #e11d48; } .note-item.pos { color: #0284c7; } .note-item.warn { color: #92400e; }
     .page-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; font-family: 'DM Mono', monospace; }
     @media print { body { padding: 20px 24px; } }
   </style>
@@ -147,7 +291,6 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
     <div class="header-meta">
       <div class="header-date">${dateStr}</div>
       <div class="header-store">${storeName || 'Store'}</div>
-      ${session.notes ? `<div class="header-note">${session.notes}</div>` : ''}
     </div>
   </div>
   <div class="stats-strip">
@@ -173,25 +316,28 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
       <div class="report-box-title">SR50 — Invoice</div>
       <div class="report-row"><span class="report-label">Net Sales</span><span class="report-value plus">$${sr50NetSales.toFixed(2)}</span></div>
       <div class="report-row"><span class="report-label">SR50 Cashes</span><span class="report-value minus">−$${sr50Cashes.toFixed(2)}</span></div>
-      <div class="report-row total"><span class="report-label bold">SR50 Net</span><span class="report-value neutral">$${(sr50NetSales - sr50Cashes).toFixed(2)}</span></div>
+      <div class="report-row total"><span class="report-label bold">SR50 Net</span><span class="report-value neutral">${money(sr50NetSales - sr50Cashes)}</span></div>
     </div>
     <div class="report-box">
-      <div class="report-box-title">IR34 — Cashing</div>
-      <div class="report-row"><span class="report-label">IR34 Cashes</span><span class="report-value minus">−$${ir34Cashes.toFixed(2)}</span></div>
-      <div class="report-row"><span class="report-label">Ticket Revenue</span><span class="report-value neutral">$${grandAmt.toFixed(2)}</span></div>
-      <div class="report-row total"><span class="report-label bold">Total Cashes</span><span class="report-value minus">$${totalCashes.toFixed(2)}</span></div>
+      <div class="report-box-title">Cashes — SR50 + IR34</div>
+      <div class="report-row"><span class="report-label">SR50 Cashes</span><span class="report-value minus">$${sr50Cashes.toFixed(2)}</span></div>
+      <div class="report-row"><span class="report-label">IR34 Cashes</span><span class="report-value minus">$${ir34Cashes.toFixed(2)}</span></div>
+      <div class="report-row total"><span class="report-label bold">Total Cashes</span><span class="report-value minus">−$${totalCashes.toFixed(2)}</span></div>
     </div>
   </div>
+  <div class="closeout">
   <div class="final-box ${finalTotal >= 0 ? 'positive' : 'negative'}">
     <div>
       <div class="final-label ${finalTotal >= 0 ? 'positive' : 'negative'}">Final Total</div>
-      <div class="final-value ${finalTotal >= 0 ? 'positive' : 'negative'}">${finalTotal >= 0 ? '$' : '−$'}${Math.abs(finalTotal).toFixed(2)}</div>
+      <div class="final-value ${finalTotal >= 0 ? 'positive' : 'negative'}">${money(finalTotal)}</div>
       <div class="final-formula">
         Ticket Revenue ($${grandAmt.toFixed(2)}) + SR50 Net Sales ($${sr50NetSales.toFixed(2)})<br>
-        − SR50 Cashes ($${sr50Cashes.toFixed(2)}) − IR34 Cashes ($${ir34Cashes.toFixed(2)})
+        − SR50 Cashes ($${sr50Cashes.toFixed(2)}) − IR34 Cashes ($${ir34Cashes.toFixed(2)})${cbAmount ? `<br>+ CB — Cashed from Back ($${cbAmount.toFixed(2)})` : ''}
       </div>
     </div>
     <div class="final-icon">${finalTotal >= 0 ? '✓' : '!'}</div>
+  </div>
+  ${notesSection}
   </div>
   <div class="page-footer">
     <span>Generated ${new Date().toLocaleString()}</span>
@@ -203,32 +349,58 @@ function generateHtml(session: Session, bookMap: Record<number, Book>, tickets: 
 
 // ─── Report Panel ─────────────────────────────────────────────────────────────
 
-function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Session) => void }) {
+type ReportField = 'sr50_net_sales' | 'sr50_cashes' | 'ir34_totals'
+
+function ReportPanel({ session, onSave, onError }: {
+  session: Session
+  onSave:  (s: Session) => void
+  onError: (msg: string) => void
+}) {
   const [tab,    setTab]    = useState<'sr50' | 'ir34'>('sr50')
-  const [draft,  setDraft]  = useState<Partial<Session>>({})
+  const [draft,  setDraft]  = useState<Partial<Record<ReportField, string>>>({})
   const [saving, setSaving] = useState(false)
   const [saved,  setSaved]  = useState(false)
-  const merged = { ...session, ...draft }
+
+  // Empty input counts as 0 for display and saving.
+  function parse(s: string) { return s.trim() === '' ? 0 : Number(s) }
+  const merged = { ...session } as Session
+  ;(Object.keys(draft) as ReportField[]).forEach(k => {
+    const v = parse(draft[k]!)
+    if (!isNaN(v)) merged[k] = v
+  })
 
   async function save() {
-    if (Object.keys(draft).length === 0) return
-    setSaving(true)
-    const { data } = await supabase.from('sessions').update(draft).eq('id', session.id).select().single()
-    if (data) {
-      onSave(data); setDraft({})
-      setSaved(true); setTimeout(() => setSaved(false), 2000)
+    const sent = draft
+    const keys = Object.keys(sent) as ReportField[]
+    if (keys.length === 0) return
+    const update: Partial<Record<ReportField, number>> = {}
+    for (const k of keys) {
+      const v = parse(sent[k]!)
+      if (isNaN(v) || v < 0) { onError('Enter a valid amount'); return }
+      update[k] = v
     }
+    setSaving(true)
+    const { data, error } = await tracked(supabase.from('sessions').update(update).eq('id', session.id).select().single())
     setSaving(false)
+    if (error || !data) { onError('⚠ Save failed — check connection and try again'); return }
+    onSave(data)
+    // Only clear fields that weren't edited again while saving.
+    setDraft(p => {
+      const next = { ...p }
+      keys.forEach(k => { if (next[k] === sent[k]) delete next[k] })
+      return next
+    })
+    setSaved(true); setTimeout(() => setSaved(false), 2000)
   }
 
-  function fi(key: keyof Session, label: string) {
+  function fi(key: ReportField, label: string) {
     return (
       <div style={{ marginBottom: 14 }}>
         <label className="field-label">{label}</label>
         <input
-          type="number" inputMode="decimal" step="0.01"
-          value={draft[key] !== undefined ? String(draft[key]) : String(merged[key] ?? '')}
-          onChange={e => setDraft(p => ({ ...p, [key]: e.target.value === '' ? 0 : Number(e.target.value) }))}
+          type="number" inputMode="decimal" step="0.01" min="0"
+          value={draft[key] !== undefined ? draft[key] : (session[key] ? String(session[key]) : '')}
+          onChange={e => setDraft(p => ({ ...p, [key]: e.target.value }))}
           onBlur={save}
           onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
           placeholder="0.00" className="field-input"
@@ -270,6 +442,155 @@ function ReportPanel({ session, onSave }: { session: Session; onSave: (s: Sessio
           {fi('ir34_totals', 'IR34 Cashes')}
         </>)}
       </div>
+    </div>
+  )
+}
+
+// ─── Close Out: CB + Cash Short/Over ──────────────────────────────────────────
+
+const SAVE_FAILED = '⚠ Save failed — check connection and try again'
+
+function CloseOutPanel({ session, totalBeforeCb, disabled, onSave, notify }: {
+  session:       Session
+  totalBeforeCb: number
+  disabled?:     boolean
+  onSave:        (s: Session) => void
+  notify:        (msg: string) => void
+}) {
+  const onError = notify
+  const cb       = n(session.cb_amount)
+  const cashDiff = n(session.cash_diff)
+
+  const [cbOpen,   setCbOpen]   = useState(false)
+  const [cbDraft,  setCbDraft]  = useState<string | null>(null)
+  const [diffOpen, setDiffOpen] = useState(false)
+  const [diffType, setDiffType] = useState<'short' | 'over'>(cashDiff > 0 ? 'over' : 'short')
+  const [amtDraft, setAmtDraft] = useState(cashDiff ? String(Math.abs(cashDiff)) : '')
+  const [noteDraft,setNoteDraft]= useState(session.cash_note || '')
+  const [savingDiff, setSavingDiff] = useState(false)
+
+  const showCb   = totalBeforeCb < 0 || cb > 0 || cbOpen
+  const hasDiff  = cashDiff !== 0 || !!session.cash_note
+  const showDiff = hasDiff || diffOpen
+
+  async function update(fields: Partial<Session>) {
+    const { data, error } = await tracked(supabase.from('sessions').update(fields).eq('id', session.id).select().single())
+    if (error || !data) { onError(SAVE_FAILED); return false }
+    onSave(data)
+    return true
+  }
+
+  async function saveCb() {
+    if (cbDraft === null) return
+    const v = cbDraft.trim() === '' ? 0 : Number(cbDraft)
+    if (isNaN(v) || v < 0) { onError('Enter a valid CB amount'); return }
+    if (v === cb) { setCbDraft(null); return }
+    if (await update({ cb_amount: v })) setCbDraft(null)
+  }
+
+  async function saveDiff() {
+    const amt = amtDraft.trim() === '' ? 0 : Number(amtDraft)
+    if (isNaN(amt) || amt < 0) { onError('Enter a valid amount'); return }
+    if (amt > 0 && noteDraft.trim() === '') { onError('Please write a note explaining the difference'); return }
+    setSavingDiff(true)
+    const ok = await update({
+      cash_diff: diffType === 'short' ? -amt : amt,
+      cash_note: noteDraft.trim() || null,
+    })
+    setSavingDiff(false)
+    if (ok) notify(amt > 0 ? `✓ Cash ${diffType} noted` : '✓ Cleared')
+  }
+
+  async function clearDiff() {
+    if (await update({ cash_diff: 0, cash_note: null })) {
+      setAmtDraft(''); setNoteDraft(''); setDiffOpen(false)
+    }
+  }
+
+  const lbl: React.CSSProperties = { fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: '.08em', textTransform: 'uppercase', fontWeight: 600 }
+  const box: React.CSSProperties = { padding: '14px 18px', borderTop: '1px solid var(--line-dk)', background: 'var(--card)' }
+  const diffDirty = amtDraft !== (cashDiff ? String(Math.abs(cashDiff)) : '')
+    || noteDraft !== (session.cash_note || '')
+    || (cashDiff !== 0 && diffType !== (cashDiff > 0 ? 'over' : 'short'))
+
+  return (
+    <div>
+      {/* ── CB: Cashed from Back ── */}
+      {showCb ? (
+        <div style={box}>
+          <div style={{ ...lbl, color: 'var(--gold)', marginBottom: 4 }}>Add (CB) — Cashed from Back</div>
+          {totalBeforeCb < 0 && cb === 0 && (
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 10 }}>
+              Total is {money(totalBeforeCb)}. Enter cashes paid from the other register.
+            </div>
+          )}
+          <input
+            type="number" inputMode="decimal" step="0.01" min="0" placeholder="0.00"
+            disabled={disabled}
+            value={cbDraft !== null ? cbDraft : (cb ? String(cb) : '')}
+            onChange={e => setCbDraft(e.target.value)}
+            onBlur={saveCb}
+            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+            className="field-input"
+            style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700 }}
+          />
+          {cb > 0 && (
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-faint)', marginTop: 8 }}>
+              {money(totalBeforeCb)} + CB ${cb.toFixed(2)} = <b style={{ color: totalBeforeCb + cb >= 0 ? 'var(--emerald)' : 'var(--rose)' }}>{money(totalBeforeCb + cb)}</b>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* ── Cash Short / Over ── */}
+      {showDiff ? (
+        <div style={box}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <div style={{ ...lbl, color: cashDiff < 0 ? 'var(--rose)' : cashDiff > 0 ? 'var(--sky)' : 'var(--ink-faint)' }}>
+              Cash Short / Over {cashDiff !== 0 && `· ${cashDiff < 0 ? 'SHORT' : 'OVER'} $${Math.abs(cashDiff).toFixed(2)}`}
+            </div>
+            {hasDiff && !disabled && (
+              <button className="btn btn-ghost btn-sm" onClick={clearDiff}>Clear</button>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            {(['short', 'over'] as const).map(t => (
+              <button key={t} disabled={disabled}
+                className={`btn ${diffType === t ? (t === 'short' ? 'btn-red' : 'btn-gold') : 'btn-ghost'}`}
+                onClick={() => setDiffType(t)}
+                style={{ flex: 1, padding: '10px' }}>
+                {t === 'short' ? '− Short' : '+ Over'}
+              </button>
+            ))}
+          </div>
+          <input
+            type="number" inputMode="decimal" step="0.01" min="0" placeholder="Amount (0.00)"
+            disabled={disabled} value={amtDraft} onChange={e => setAmtDraft(e.target.value)}
+            className="field-input"
+            style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, marginBottom: 10 }}
+          />
+          <textarea
+            placeholder="Note for owner — why is the cash short / over?"
+            disabled={disabled} value={noteDraft} onChange={e => setNoteDraft(e.target.value)}
+            rows={2} className="field-input"
+            style={{ fontFamily: 'var(--sans)', fontSize: 13, resize: 'vertical', marginBottom: 10, height: 'auto', padding: '10px 12px' }}
+          />
+          {!disabled && (
+            <button className="btn btn-gold" onClick={saveDiff} disabled={savingDiff || !diffDirty}
+              style={{ width: '100%', padding: '11px' }}>
+              {savingDiff ? 'Saving...' : diffDirty ? 'Save Note' : '✓ Saved'}
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      {/* ── Buttons to open the optional sections ── */}
+      {!disabled && (!showCb || !showDiff) && (
+        <div style={{ display: 'flex', gap: 8, padding: '10px 18px', borderTop: '1px solid var(--line)' }}>
+          {!showCb   && <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={() => setCbOpen(true)}>+ Add (CB)</button>}
+          {!showDiff && <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={() => setDiffOpen(true)}>± Cash Short / Over</button>}
+        </div>
+      )}
     </div>
   )
 }
@@ -336,9 +657,10 @@ function NumInput({ value, placeholder, onSave, onEnter, disabled }: {
 
 // ─── Notes Input ──────────────────────────────────────────────────────────────
 
-function NotesInput({ session, onSave, disabled }: {
+function NotesInput({ session, onSave, onError, disabled }: {
   session: Session
   onSave: (s: Session) => void
+  onError: (msg: string) => void
   disabled?: boolean
 }) {
   const [editing, setEditing] = useState(false)
@@ -351,10 +673,15 @@ function NotesInput({ session, onSave, disabled }: {
     setEditing(false)
     if (draft === (session.notes || '')) return
     setSaving(true)
-    const { data } = await supabase.from('sessions')
-      .update({ notes: draft || null }).eq('id', session.id).select().single()
-    if (data) onSave(data)
+    const { data, error } = await tracked(supabase.from('sessions')
+      .update({ notes: draft || null }).eq('id', session.id).select().single())
     setSaving(false)
+    if (error || !data) {
+      // Keep the typed text in draft so tapping the note again lets them retry.
+      onError('⚠ Note not saved — check connection and try again')
+      return
+    }
+    onSave(data)
   }
 
   if (editing && !disabled) {
@@ -395,6 +722,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const [isOnline,   setIsOnline]   = useState(true)
   const [isAdmin,    setIsAdmin]    = useState(false)
   const [savingPdf,  setSavingPdf]  = useState(false)
+  const [prevDay,    setPrevDay]    = useState<PrevDay | null>(null)
   const redirected    = useRef(false)
   const startCellRefs = useRef<(HTMLDivElement | null)[]>([])
   const endCellRefs   = useRef<(HTMLDivElement | null)[]>([])
@@ -409,7 +737,10 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   }, [])
 
   useEffect(() => {
-    const handler = (e: BeforeUnloadEvent) => { e.preventDefault() }
+    const handler = (e: BeforeUnloadEvent) => {
+      if (pendingSaves === 0) return
+      e.preventDefault(); e.returnValue = ''
+    }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
   }, [])
@@ -442,55 +773,30 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
     if (sess) {
       const sessionIsToday = sess.session_date === new Date().toLocaleDateString('en-CA')
+      const oldSnapshot    = sess.ticket_snapshot as TicketValue[] | null
+      const hasSnapshot    = !!oldSnapshot && oldSnapshot.length > 0
 
-      if (sessionIsToday) {
-        // ── Today: always use live ticket_values so settings changes reflect immediately ──
-        // Update snapshot silently in background so PDF uses today's latest prices
-        if (tvs) {
-          const snapshot = tvs.map((t: TicketValue) => ({
-            ticket_number: t.ticket_number,
-            value:         t.value,
-            book_size:     t.book_size,
-          }))
-          supabase.from('sessions')
-            .update({ ticket_snapshot: snapshot })
-            .eq('id', sess.id)
-            .then(() => {})  // fire and forget
-          setTickets(tvs)
-        }
-        setSession(sess)
-      } else {
-        // ── Past sessions: use snapshot to preserve old prices ──
-        if (tvs && !sess.ticket_snapshot) {
-          // Save snapshot if not already saved
-          const snapshot = tvs.map((t: TicketValue) => ({
-            ticket_number: t.ticket_number,
-            value:         t.value,
-            book_size:     t.book_size,
-          }))
-          const { data: updated } = await supabase
-            .from('sessions')
-            .update({ ticket_snapshot: snapshot })
-            .eq('id', sess.id)
-            .select().single()
-          if (updated) setSession(updated)
-          else setSession(sess)
-        } else {
-          setSession(sess)
-        }
+      // Today: refresh prices from Settings, but keep row order stable.
+      // Past: keep the saved snapshot so old prices are preserved.
+      const list = sessionIsToday || !hasSnapshot
+        ? mergeSnapshot(oldSnapshot, (tvs || []) as TicketValue[])
+        : oldSnapshot!
 
-        // Use snapshot for display on past sessions
-        if (sess.ticket_snapshot) {
-          const snapshot = sess.ticket_snapshot as TicketValue[]
-          if (snapshot && snapshot.length > 0) {
-            setTickets(snapshot)
-          } else if (tvs) {
-            setTickets(tvs)
-          }
-        } else if (tvs) {
-          setTickets(tvs)
-        }
+      let current: Session = sess
+      if (list.length > 0 && JSON.stringify(list) !== JSON.stringify(oldSnapshot)) {
+        // Await this so the on-screen list, the session state and the PDF all agree.
+        const { data: updated, error } = await supabase
+          .from('sessions').update({ ticket_snapshot: list })
+          .eq('id', sess.id).select().single()
+        current = updated ?? { ...sess, ticket_snapshot: list }
+        if (error) showToast('⚠ Could not save ticket prices — check connection')
       }
+      setSession(current)
+      setTickets(list)
+
+      // Previous day's books — used for "start changed" notes and "⬆ Yesterday".
+      const { prev } = await fetchPrevDay(sid, sess.session_date, list)
+      setPrevDay(prev)
     }
 
     if (bks) {
@@ -508,22 +814,28 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     if (!auth || !session) return
     const existingBook = bookMap[ticketIndex + 1]
     const ticket       = tickets[ticketIndex]
+    const maxNum       = ticket?.book_size || 100
+
+    if (value !== null && (!Number.isInteger(value) || value < 0 || value > maxNum)) {
+      showToast(`⚠ Enter a whole number from 0 to ${maxNum}`)
+      return
+    }
+    if (existingBook && existingBook[field] === value) return
 
     if (existingBook) {
-      const { data } = await supabase.from('books')
-        .update({ [field]: value }).eq('id', existingBook.id).select().single()
-      if (data) {
-        setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
-        const updated  = { ...existingBook, [field]: value }
-        const bookSize = ticket?.book_size || 100
-        if (updated.start_num !== null && updated.end_num !== null && ticket) {
-          const s = calcSold(updated.start_num, updated.end_num, bookSize)
-          showToast(`#${ticket.ticket_number} → ${s} sold · $${calcTotal(s, ticket.value).toFixed(2)}`)
-          if (navigator.vibrate) navigator.vibrate(40)
-        }
+      const { data, error } = await tracked(supabase.from('books')
+        .update({ [field]: value }).eq('id', existingBook.id).select().single())
+      if (error || !data) { showToast(SAVE_FAILED); return }
+      setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
+      if (data.start_num !== null && data.end_num !== null && ticket) {
+        const s = calcSold(data.start_num, data.end_num, maxNum)
+        showToast(`#${ticket.ticket_number} → ${s} sold · $${calcTotal(s, ticket.value).toFixed(2)}`)
+        if (navigator.vibrate) navigator.vibrate(40)
       }
+      if (field === 'start_num' && ticket) await correctPrevEnd(ticket, existingBook.start_num, value)
     } else {
-      const { data } = await supabase.from('books').insert({
+      if (value === null) return
+      const { data, error } = await tracked(supabase.from('books').insert({
         session_id:  session.id,
         row_number:  ticketIndex + 1,
         is_returned: false,
@@ -531,9 +843,80 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         start_num:   null,
         end_num:     null,
         [field]:     value,
-      }).select().single()
-      if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
+      }).select().single())
+      if (error || !data) { showToast(SAVE_FAILED); return }
+      setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     }
+  }
+
+  // Read-modify-write a session's corrections list (read fresh from DB so two
+  // quick edits don't overwrite each other).
+  async function updateCorrections(sessionId: string, change: (list: Correction[]) => Correction[]) {
+    const { data: cur, error } = await supabase.from('sessions').select('corrections').eq('id', sessionId).single()
+    if (error) return null
+    const next = change((cur?.corrections as Correction[] | null) || [])
+    const { data, error: upErr } = await tracked(supabase.from('sessions')
+      .update({ corrections: next }).eq('id', sessionId).select().single())
+    return upErr ? null : (data as Session)
+  }
+
+  function setPrevEnd(ticketNumber: number, book: Book) {
+    setPrevDay(p => {
+      if (!p) return p
+      const byTicket = new Map(p.byTicket)
+      byTicket.set(ticketNumber, book)
+      return { ...p, byTicket }
+    })
+  }
+
+  // Staff changed a start number that had been carried over from the previous
+  // day's end → that end was wrong, so fix it too and leave a note on both days.
+  async function correctPrevEnd(ticket: TicketValue, oldStart: number | null, newStart: number | null) {
+    if (!session || !prevDay || oldStart === null || newStart === null || oldStart === newStart) return
+    // Column missing (migration not run yet) → don't change the previous day without a note.
+    if (!('corrections' in session)) return
+    const prevBook = prevDay.byTicket.get(ticket.ticket_number)
+    if (!prevBook || prevBook.is_returned || prevBook.end_num === null) return
+    if (prevBook.end_num !== oldStart) return                   // start wasn't carried over
+    const oldPrice = prevDay.priceOf.get(ticket.ticket_number)
+    if (oldPrice !== undefined && oldPrice !== ticket.value) return  // different game in this slot
+
+    const { data: pb, error } = await tracked(supabase.from('books')
+      .update({ end_num: newStart }).eq('id', prevBook.id).select().single())
+    if (error || !pb) { showToast('⚠ Start saved, but previous day\'s end could not be updated'); return }
+    setPrevEnd(ticket.ticket_number, pb)
+
+    const at = new Date().toISOString()
+    const base = { ticket_number: ticket.ticket_number, old: oldStart, new: newStart, at }
+    const [prevOk, today] = await Promise.all([
+      updateCorrections(prevBook.session_id, l => mergeCorrection(l, { ...base, kind: 'end',   other_date: session.session_date })),
+      updateCorrections(session.id,          l => mergeCorrection(l, { ...base, kind: 'start', other_date: prevDay.date })),
+    ])
+    if (today) setSession(today)
+    if (!prevOk || !today) { showToast('⚠ Numbers fixed, but the note for the owner could not be saved'); return }
+
+    const day = new Date(prevDay.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    showToast(`✓ #${ticket.ticket_number} start fixed · ${day} end also changed to ${newStart}`)
+  }
+
+  // "It's a new book" — put the previous day's end back and remove both notes.
+  async function undoCorrection(c: Correction) {
+    if (!session || !prevDay || prevDay.date !== c.other_date) { showToast('⚠ Could not find the previous session'); return }
+    const prevBook = prevDay.byTicket.get(c.ticket_number)
+    if (!prevBook) return
+    const { data: pb, error } = await tracked(supabase.from('books')
+      .update({ end_num: c.old }).eq('id', prevBook.id).select().single())
+    if (error || !pb) { showToast(SAVE_FAILED); return }
+    setPrevEnd(c.ticket_number, pb)
+
+    const drop = (kind: Correction['kind']) => (l: Correction[]) =>
+      l.filter(x => !(x.kind === kind && x.ticket_number === c.ticket_number))
+    const [, today] = await Promise.all([
+      updateCorrections(prevBook.session_id, drop('end')),
+      updateCorrections(session.id,          drop('start')),
+    ])
+    if (today) setSession(today)
+    showToast(`↩ Previous day's end for #${c.ticket_number} restored to ${c.old}`)
   }
 
   async function toggleReturn(ticketIndex: number) {
@@ -542,21 +925,19 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const existingBook = bookMap[ticketIndex + 1]
     const newReturned  = !existingBook?.is_returned
 
-    if (existingBook) {
-      const { data } = await supabase.from('books')
-        .update({ is_returned: newReturned }).eq('id', existingBook.id).select().single()
-      if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
-    } else {
-      const { data } = await supabase.from('books').insert({
-        session_id:  session.id,
-        row_number:  ticketIndex + 1,
-        is_returned: true,
-        user_id:     auth.user.id,
-        start_num:   null,
-        end_num:     null,
-      }).select().single()
-      if (data) setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
-    }
+    const { data, error } = await tracked(existingBook
+      ? supabase.from('books')
+          .update({ is_returned: newReturned }).eq('id', existingBook.id).select().single()
+      : supabase.from('books').insert({
+          session_id:  session.id,
+          row_number:  ticketIndex + 1,
+          is_returned: true,
+          user_id:     auth.user.id,
+          start_num:   null,
+          end_num:     null,
+        }).select().single())
+    if (error || !data) { showToast(SAVE_FAILED); return }
+    setBookMap(prev => ({ ...prev, [ticketIndex + 1]: data }))
     if (navigator.vibrate) navigator.vibrate(40)
     showToast(newReturned ? 'Marked as returned' : 'Unmarked')
   }
@@ -565,70 +946,65 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     const { data: { session: auth } } = await supabase.auth.getSession()
     if (!auth || !session) return
 
-    const yesterday = new Date(session.session_date + 'T00:00:00')
-    yesterday.setDate(yesterday.getDate() - 1)
-    const yDate = yesterday.toLocaleDateString('en-CA')
-    const sid   = localStorage.getItem('selected_store_id')
+    const sid = localStorage.getItem('selected_store_id') || ''
 
-    const { data: prevSession } = await supabase
-      .from('sessions').select('id')
-      .eq('store_id', sid || '').eq('session_date', yDate).maybeSingle()
+    // Re-fetch so we copy the latest numbers even if yesterday was just corrected.
+    const { prev, error: prevErr } = await fetchPrevDay(sid, session.session_date, tickets)
+    if (prevErr) { showToast(SAVE_FAILED); return }
+    setPrevDay(prev)
+    if (!prev) { showToast('No previous session found'); return }
+    if (prev.byTicket.size === 0) { showToast('No data in the previous session'); return }
 
-    if (!prevSession) { showToast('No session found for yesterday'); return }
-
-    const { data: prevBooks } = await supabase
-      .from('books').select('*')
-      .eq('session_id', prevSession.id).order('row_number')
-
-    if (!prevBooks || prevBooks.length === 0) { showToast("No data in yesterday's session"); return }
-
-    let copied = 0
-    for (const prevBook of prevBooks) {
-      const rowNum = prevBook.row_number
-      if (prevBook.end_num === null) continue
+    let copied = 0, failed = 0
+    for (let idx = 0; idx < tickets.length; idx++) {
+      const prevBook = prev.byTicket.get(tickets[idx].ticket_number)
+      if (!prevBook || prevBook.end_num === null || prevBook.is_returned) continue
+      const rowNum   = idx + 1
       const existing = bookMap[rowNum]
+      if (existing && existing.start_num !== null) continue
 
-      if (existing) {
-        if (existing.start_num !== null) continue
-        const { data } = await supabase.from('books')
-          .update({ start_num: prevBook.end_num }).eq('id', existing.id).select().single()
-        if (data) setBookMap(prev => ({ ...prev, [rowNum]: data }))
-      } else {
-        const { data } = await supabase.from('books').insert({
-          session_id:  session.id,
-          row_number:  rowNum,
-          is_returned: false,
-          user_id:     auth.user.id,
-          start_num:   prevBook.end_num,
-          end_num:     null,
-        }).select().single()
-        if (data) setBookMap(prev => ({ ...prev, [rowNum]: data }))
-      }
+      const { data, error } = await tracked(existing
+        ? supabase.from('books')
+            .update({ start_num: prevBook.end_num }).eq('id', existing.id).select().single()
+        : supabase.from('books').insert({
+            session_id:  session.id,
+            row_number:  rowNum,
+            is_returned: false,
+            user_id:     auth.user.id,
+            start_num:   prevBook.end_num,
+            end_num:     null,
+          }).select().single())
+      if (error || !data) { failed++; continue }
+      setBookMap(prev => ({ ...prev, [rowNum]: data }))
       copied++
     }
 
     if (navigator.vibrate) navigator.vibrate([40, 30, 40])
-    showToast(copied > 0 ? `✓ Copied ${copied} start numbers from yesterday` : 'Nothing to copy')
+    if (failed > 0) showToast(`⚠ Copied ${copied}, ${failed} failed — check connection and try again`)
+    else {
+      const from = new Date(prev.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      showToast(copied > 0 ? `✓ Copied ${copied} start numbers from ${from}` : 'Nothing to copy')
+    }
   }
 
   async function handlePrint() {
     if (!session) return
     setSavingPdf(true)
 
-    const html = generateHtml(session, bookMap, tickets)
+    const html = generateHtml(session, bookMap, tickets, startNotes)
 
-    const { data } = await supabase
+    const { data, error } = await tracked(supabase
       .from('sessions')
       .update({
         pdf_html:     html,
         pdf_saved_at: new Date().toISOString(),
       })
       .eq('id', session.id)
-      .select().single()
+      .select().single())
 
     if (data) setSession(data)
     setSavingPdf(false)
-    showToast('✓ PDF saved to History')
+    showToast(error || !data ? '⚠ Could not save PDF to History — printing anyway' : '✓ PDF saved to History')
 
     const w = window.open('', '_blank')
     if (!w) return
@@ -657,9 +1033,9 @@ export default function SessionPage({ params }: { params: { id: string } }) {
     if (!session || loading) return
     if (grandAmt === n(session.ticket_revenue)) return
     const timer = setTimeout(async () => {
-      const { data } = await supabase.from('sessions')
-        .update({ ticket_revenue: grandAmt }).eq('id', session.id).select().single()
-      if (data) setSession(data)
+      const { data } = await tracked(supabase.from('sessions')
+        .update({ ticket_revenue: grandAmt }).eq('id', session.id).select().single())
+      if (data) setSession(data)  // derived value — retried automatically on next change/load
     }, 1000)
     return () => clearTimeout(timer)
   }, [grandAmt, session?.id, loading])
@@ -672,8 +1048,16 @@ export default function SessionPage({ params }: { params: { id: string } }) {
   const sr50NetSales = n(session?.sr50_net_sales)
   const sr50Cashes   = n(session?.sr50_cashes)
   const ir34Cashes   = n(session?.ir34_totals)
-  const finalTotal   = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
-  const hasFinalData = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0
+  const cbAmount     = n(session?.cb_amount)
+  const totalBeforeCb = parseFloat((grandAmt + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+  const finalTotal   = parseFloat((totalBeforeCb + cbAmount).toFixed(2))
+  const hasFinalData = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0 || cbAmount > 0
+
+  const startChanges    = findStartChanges(tickets, bookMap, prevDay)
+  const startChangeSet  = new Set(startChanges.map(c => c.ticket_number))
+  const corrections     = (session?.corrections as Correction[] | null) || []
+  const mismatchNotes   = prevDay ? startChanges.map(c => startChangeText(c, prevDay.date)) : []
+  const startNotes      = [...corrections.map(correctionText), ...mismatchNotes]  // all auto notes (screen + PDF)
 
   const storeName = typeof window !== 'undefined' ? localStorage.getItem('selected_store_name') || '' : ''
 
@@ -682,7 +1066,7 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
   const sessionDate = new Date(session.session_date + 'T00:00:00')
   const isToday     = session.session_date === new Date().toLocaleDateString('en-CA')
-  const isLocked    = !isAdmin && !isToday
+  const isLocked    = false
 
   return (
     <div style={{ maxWidth: 620, margin: '0 auto', paddingBottom: 80 }}>
@@ -736,13 +1120,36 @@ export default function SessionPage({ params }: { params: { id: string } }) {
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', background: 'var(--navy-mid)', borderBottom: '1px solid var(--line)' }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-faint)', letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Note</span>
-        <NotesInput session={session} onSave={s => setSession(s)} disabled={isLocked} />
+        <NotesInput session={session} onSave={s => setSession(s)} onError={showToast} disabled={isLocked} />
         {!isLocked && (
           <button onClick={copyFromYesterday} className="btn btn-ghost btn-sm" style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
             ⬆ Yesterday
           </button>
         )}
       </div>
+
+      {startNotes.length > 0 && (
+        <div style={{ padding: '10px 14px', background: 'rgba(240,165,0,0.06)', borderBottom: '1px solid var(--line-dk)' }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--gold)', letterSpacing: '.08em', textTransform: 'uppercase', fontWeight: 600, marginBottom: 6 }}>
+            ⚠ Auto Notes for Owner
+          </div>
+          {corrections.map(c => (
+            <div key={`${c.kind}-${c.ticket_number}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-mid)', lineHeight: 1.6 }}>
+              <span style={{ flex: 1 }}>✎ {correctionText(c)}</span>
+              {c.kind === 'start' && !isLocked && (
+                <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0, fontSize: 10, padding: '2px 8px' }}
+                  title="Use this if it's a new book and the previous day's end was actually right"
+                  onClick={() => undoCorrection(c)}>
+                  Undo (new book)
+                </button>
+              )}
+            </div>
+          ))}
+          {mismatchNotes.map(t => (
+            <div key={t} style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-mid)', lineHeight: 1.6 }}>{t}</div>
+          ))}
+        </div>
+      )}
 
       {tickets.length === 0 && (
         <div style={{ margin: 18, padding: '14px 18px', background: 'var(--rose-lt)', border: '1px solid var(--rose)', borderRadius: 10, fontSize: 13, color: 'var(--rose)' }}>
@@ -786,6 +1193,12 @@ export default function SessionPage({ params }: { params: { id: string } }) {
                           #{ticket.ticket_number}
                         </span>
                         {isFinished && !isReturned && <span className="badge badge-muted">DONE</span>}
+                        {startChangeSet.has(ticket.ticket_number) && !isReturned && (
+                          <span title="Start number differs from previous day's end"
+                            style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 700, color: 'var(--gold)', border: '1px solid var(--gold)', borderRadius: 4, padding: '1px 4px' }}>
+                            START≠{prevDay?.byTicket.get(ticket.ticket_number)?.end_num}
+                          </span>
+                        )}
                         {!hasData && !isReturned && !isFinished && !isLocked && (
                           <span style={{ fontSize: 10, color: 'var(--ink-ghost)' }}>tap</span>
                         )}
@@ -862,56 +1275,41 @@ export default function SessionPage({ params }: { params: { id: string } }) {
         </div>
       )}
 
-      {!isLocked && showReport && <ReportPanel session={session} onSave={s => setSession(s)} />}
+      {!isLocked && showReport && <ReportPanel session={session} onSave={s => setSession(s)} onError={showToast} />}
 
-      {!isLocked && hasFinalData && !showReport && (
-        <div onClick={() => setShowReport(true)} style={{ cursor: 'pointer' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
-            {[
-              { label: 'Tickets',     val: `$${grandAmt.toFixed(2)}`,    color: 'var(--ink)' },
-              { label: '+ Net Sales', val: `$${sr50NetSales.toFixed(2)}`, color: 'var(--sky)' },
-              { label: '− SR50',      val: `$${sr50Cashes.toFixed(2)}`,  color: 'var(--rose)' },
-              { label: '− IR34',      val: `$${ir34Cashes.toFixed(2)}`,  color: 'var(--rose)' },
-            ].map(({ label, val, color }) => (
-              <div key={label} style={{ textAlign: 'center' }}>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color }}>{val}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ padding: '14px 18px', background: finalTotal >= 0 ? 'var(--emerald-lt)' : 'var(--rose-lt)', borderTop: `1px solid ${finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', marginBottom: 4 }}>Final Total</div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 30, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', lineHeight: 1 }}>${finalTotal.toFixed(2)}</div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', marginTop: 5 }}>Tickets + Net Sales − SR50 − IR34 Cashes</div>
+      {hasFinalData && (isLocked || !showReport) && (() => {
+        const good  = finalTotal >= 0
+        const items = [
+          { label: 'Tickets',     val: `$${grandAmt.toFixed(2)}`,     color: 'var(--ink)' },
+          { label: '+ Net Sales', val: `$${sr50NetSales.toFixed(2)}`, color: 'var(--sky)' },
+          { label: '− SR50',      val: `$${sr50Cashes.toFixed(2)}`,   color: 'var(--rose)' },
+          { label: '− IR34',      val: `$${ir34Cashes.toFixed(2)}`,   color: 'var(--rose)' },
+          ...(cbAmount > 0 ? [{ label: '+ CB', val: `$${cbAmount.toFixed(2)}`, color: 'var(--gold)' }] : []),
+        ]
+        return (
+          <div onClick={isLocked ? undefined : () => setShowReport(true)} style={{ cursor: isLocked ? 'default' : 'pointer' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${items.length}, 1fr)`, background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
+              {items.map(({ label, val, color }) => (
+                <div key={label} style={{ textAlign: 'center' }}>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color }}>{val}</div>
+                </div>
+              ))}
             </div>
-            <span style={{ color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', fontSize: 14 }}>edit →</span>
-          </div>
-        </div>
-      )}
-
-      {isLocked && hasFinalData && (
-        <div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', background: 'var(--navy-mid)', borderTop: '1px solid var(--line-dk)', padding: '12px 16px', gap: 8 }}>
-            {[
-              { label: 'Tickets',     val: `$${grandAmt.toFixed(2)}`,    color: 'var(--ink)' },
-              { label: '+ Net Sales', val: `$${sr50NetSales.toFixed(2)}`, color: 'var(--sky)' },
-              { label: '− SR50',      val: `$${sr50Cashes.toFixed(2)}`,  color: 'var(--rose)' },
-              { label: '− IR34',      val: `$${ir34Cashes.toFixed(2)}`,  color: 'var(--rose)' },
-            ].map(({ label, val, color }) => (
-              <div key={label} style={{ textAlign: 'center' }}>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color }}>{val}</div>
+            <div style={{ padding: '14px 18px', background: good ? 'var(--emerald-lt)' : 'var(--rose-lt)', borderTop: `1px solid ${good ? 'var(--emerald)' : 'var(--rose)'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: good ? 'var(--emerald)' : 'var(--rose)', marginBottom: 4 }}>Final Total</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 30, fontWeight: 700, color: good ? 'var(--emerald)' : 'var(--rose)', lineHeight: 1 }}>{money(finalTotal)}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', marginTop: 5 }}>
+                  Tickets + Net Sales − SR50 − IR34 Cashes{cbAmount > 0 ? ' + CB' : ''}
+                </div>
               </div>
-            ))}
+              {!isLocked && <span style={{ color: good ? 'var(--emerald)' : 'var(--rose)', fontSize: 14 }}>edit →</span>}
+            </div>
           </div>
-          <div style={{ padding: '14px 18px', background: finalTotal >= 0 ? 'var(--emerald-lt)' : 'var(--rose-lt)', borderTop: `1px solid ${finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)'}` }}>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 9, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase', color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', marginBottom: 4 }}>Final Total</div>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 30, fontWeight: 700, color: finalTotal >= 0 ? 'var(--emerald)' : 'var(--rose)', lineHeight: 1 }}>${finalTotal.toFixed(2)}</div>
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-faint)', marginTop: 5 }}>Tickets + Net Sales − SR50 − IR34 Cashes</div>
-          </div>
-        </div>
-      )}
+        )
+      })()}
+
 
       {!isLocked && !hasFinalData && !showReport && grandAmt > 0 && (
         <div onClick={() => setShowReport(true)} style={{ padding: '14px 18px', background: 'var(--card)', borderTop: '1px solid var(--line-dk)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
@@ -921,6 +1319,17 @@ export default function SessionPage({ params }: { params: { id: string } }) {
           </div>
           <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: 'var(--gold)' }}>${grandAmt.toFixed(2)} →</div>
         </div>
+      )}
+
+      {(hasFinalData || enteredCount > 0 || n(session.cash_diff) !== 0 || !!session.cash_note) && (
+        <CloseOutPanel
+          key={session.id}
+          session={session}
+          totalBeforeCb={totalBeforeCb}
+          disabled={isLocked}
+          onSave={s => setSession(s)}
+          notify={showToast}
+        />
       )}
 
       {enteredCount > 0 && (

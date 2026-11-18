@@ -16,6 +16,17 @@ function calcSoldSafe(start: number, end: number, bookSize: number | null): numb
   return 0
 }
 
+// Final total = tickets + net sales − SR50 cashes − IR34 cashes + CB (cashed from back)
+function finalTotalOf(s: SessionWithStats) {
+  const v = (s.total_revenue ?? 0) + (s.sr50_net_sales ?? 0) - (s.sr50_cashes ?? 0) - (s.ir34_totals ?? 0) + (s.cb_amount ?? 0)
+  return parseFloat(v.toFixed(2))
+}
+
+function csvCell(v: string | number) {
+  const s = String(v)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
 function DeleteModal({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -133,14 +144,16 @@ export default function HistoryPage() {
       const netSales   = s.sr50_net_sales ?? 0
       const sr50Cashes = s.sr50_cashes   ?? 0
       const ir34Cashes = s.ir34_totals   ?? 0
-      const finalTotal = parseFloat((rev + netSales - sr50Cashes - ir34Cashes).toFixed(2))
+      const cb         = s.cb_amount     ?? 0
+      const diff       = s.cash_diff     ?? 0
       return [
         s.session_date, s.book_count ?? 0, s.total_sold ?? 0,
         rev.toFixed(2), netSales.toFixed(2), sr50Cashes.toFixed(2),
-        ir34Cashes.toFixed(2), finalTotal.toFixed(2), s.notes ?? '',
-      ].join(',')
+        ir34Cashes.toFixed(2), cb.toFixed(2), finalTotalOf(s).toFixed(2),
+        diff.toFixed(2), s.cash_note ?? '', s.notes ?? '',
+      ].map(csvCell).join(',')
     })
-    const csv  = ['Date,Books,Sold,Ticket Revenue,SR50 Net Sales,SR50 Cashes,IR34 Cashes,Final Total,Notes', ...rows].join('\n')
+    const csv  = ['Date,Books,Sold,Ticket Revenue,SR50 Net Sales,SR50 Cashes,IR34 Cashes,CB,Final Total,Cash Short(-)/Over(+),Cash Note,Notes', ...rows].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a    = document.createElement('a')
     a.href     = URL.createObjectURL(blob)
@@ -168,11 +181,7 @@ export default function HistoryPage() {
 
   const totalDays    = filtered.length
   const totalRevenue = filtered.reduce((s, x) => s + (x.total_revenue ?? 0), 0)
-  const grandFinal   = filtered.reduce((s, x) => {
-    const rev = x.total_revenue ?? 0
-    const net = (x.sr50_net_sales ?? 0) - (x.sr50_cashes ?? 0) - (x.ir34_totals ?? 0)
-    return parseFloat((s + rev + net).toFixed(2))
-  }, 0)
+  const grandFinal   = filtered.reduce((s, x) => parseFloat((s + finalTotalOf(x)).toFixed(2)), 0)
 
   return (
     <div style={{ maxWidth: 520, margin: '0 auto', paddingBottom: 60 }}>
@@ -233,11 +242,7 @@ export default function HistoryPage() {
         ) : (
           Object.entries(grouped).map(([month, monthSessions]) => {
             const monthRevenue = monthSessions.reduce((s, x) => s + (x.total_revenue ?? 0), 0)
-            const monthFinal   = monthSessions.reduce((s, x) => {
-              const rev = x.total_revenue ?? 0
-              const net = (x.sr50_net_sales ?? 0) - (x.sr50_cashes ?? 0) - (x.ir34_totals ?? 0)
-              return parseFloat((s + rev + net).toFixed(2))
-            }, 0)
+            const monthFinal   = monthSessions.reduce((s, x) => parseFloat((s + finalTotalOf(x)).toFixed(2)), 0)
 
             return (
               <div key={month} style={{ marginBottom: 20 }}>
@@ -262,8 +267,9 @@ export default function HistoryPage() {
                     const sr50NetSales = s.sr50_net_sales ?? 0
                     const sr50Cashes   = s.sr50_cashes   ?? 0
                     const ir34Cashes   = s.ir34_totals   ?? 0
-                    const hasSR50      = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0
-                    const finalTotal   = parseFloat((rev + sr50NetSales - sr50Cashes - ir34Cashes).toFixed(2))
+                    const hasSR50      = sr50NetSales > 0 || sr50Cashes > 0 || ir34Cashes > 0 || (s.cb_amount ?? 0) > 0
+                    const finalTotal   = finalTotalOf(s)
+                    const cashDiff     = s.cash_diff ?? 0
                     const pdfHtml      = s.pdf_html
 
                     return (
@@ -280,6 +286,17 @@ export default function HistoryPage() {
                               {rev > 0 ? ` · $${rev.toFixed(2)}` : ''}
                               {s.notes ? ` · ${s.notes}` : ''}
                             </div>
+                            {(s.corrections?.length ?? 0) > 0 && (
+                              <div style={{ fontSize: 12, fontFamily: 'var(--mono)', marginTop: 3, color: 'var(--gold)' }}>
+                                ✎ {s.corrections!.length} number correction{s.corrections!.length > 1 ? 's' : ''} — open to see
+                              </div>
+                            )}
+                            {cashDiff !== 0 && (
+                              <div style={{ fontSize: 12, fontFamily: 'var(--mono)', marginTop: 3, color: cashDiff < 0 ? 'var(--rose)' : 'var(--sky)' }}>
+                                Cash {cashDiff < 0 ? 'SHORT' : 'OVER'} ${Math.abs(cashDiff).toFixed(2)}
+                                {s.cash_note ? ` — ${s.cash_note}` : ''}
+                              </div>
+                            )}
                           </div>
 
                           <div style={{ textAlign: 'right', marginRight: 4, minWidth: 80 }}>
